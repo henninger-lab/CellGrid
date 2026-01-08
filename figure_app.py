@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""
+Streamlit GUI for Automated QC Report Generator.
+
+Run with:
+    streamlit run streamlit_app.py
+"""
+
+import streamlit as st
+import os
+import sys
+import glob
+import zipfile
+from pathlib import Path
+from datetime import datetime
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from automated_report.report_generator import ReportConfig, generate_qc_report
+
+genotype_matches = None
+
+# Page config
+st.set_page_config(
+    page_title="Microscopy QC Report Generator",
+    page_icon="🔬",
+    layout="wide",
+)
+
+# Title and description
+st.title("🔬 Automated QC Report Generator")
+st.markdown("""
+Generate quality single cell comparison figures from CZI microscopy files with automated 
+nucleus segmentation, contrast normalization, and PDF export.
+""")
+
+st.divider()
+
+# Create two columns for the main layout
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.header("📁 Input/Output")
+    
+    # Input directory path
+    input_dir = st.text_input(
+        "Input directory (containing CZI files)",
+        value="",
+        placeholder="/path/to/your/czi_files/",
+        help="Enter the full path to your folder containing CZI files"
+    )
+    
+    # Scan for CZI files if directory exists
+    czi_files = []
+    if input_dir and os.path.isdir(input_dir):
+        czi_files = glob.glob(os.path.join(input_dir, "*.czi"))
+        czi_files.extend(glob.glob(os.path.join(input_dir, "*.CZI")))
+        czi_files = sorted(czi_files)
+        
+        if czi_files:
+            st.success(f"✓ Found {len(czi_files)} CZI file(s)")
+            with st.expander("View detected files"):
+                for f in czi_files:
+                    # Show file size
+                    size_mb = os.path.getsize(f) / (1024 * 1024)
+                    st.text(f"  • {os.path.basename(f)} ({size_mb:.1f} MB)")
+        else:
+            st.warning("No CZI files found in this directory")
+    elif input_dir:
+        st.error("Directory not found")
+    
+    # Output directory
+    default_output = os.path.join(input_dir, "auto_figure") if input_dir else ""
+    output_dir = st.text_input(
+        "Output directory",
+        value=default_output,
+        placeholder="/path/to/output/",
+        help="Where to save the generated reports (will be created if it doesn't exist)"
+    )
+    
+    st.divider()
+    
+    # Genotypes input
+    st.header("🧬 Genotypes")
+    st.markdown("""Enter genotype names (one per line). Files will be matched by substring.
+                **Before proceeding, make sure the genotype preview correctly matched your files!**""")
+    
+    genotypes_text = st.text_area(
+        "Genotypes",
+        value="MED1\nBRD4",
+        height=120,
+        help="Each genotype on a new line. Files containing the genotype string will be grouped together.",
+        label_visibility="collapsed",
+    )
+    
+    # Parse genotypes
+    genotypes = [g.strip() for g in genotypes_text.strip().split('\n') if g.strip()]
+    
+    if genotypes:
+        st.info(f"Genotypes: {', '.join(genotypes)}")
+        
+        # Preview genotype matching
+        if czi_files:
+            with st.expander("Preview genotype matching"):
+                for g in genotypes:
+                    matches = [os.path.basename(f) for f in czi_files if g in os.path.basename(f)]
+                    if matches:
+                        st.markdown(f"**{g}**: {len(matches)} file(s)")
+                        for m in matches[:5]:  # Show first 5
+                            st.text(f"    • {m}")
+                        if len(matches) > 5:
+                            st.text(f"    ... and {len(matches) - 5} more")
+                        genotype_matches = True
+                    else:
+                        st.markdown(f"**{g}**: ⚠️ No matches")
+                        genotype_matches = False
+
+with col_right:
+    st.header("⚙️ Figure Settings")
+    
+    # Tabs for different setting categories
+    # tab_seg, tab_vis, tab_contrast = st.tabs(["Segmentation", "Visualization", "Contrast"])
+    
+    st.markdown("### Segmentation")
+    nuclear_channel = st.number_input(
+        "Nuclear channel index",
+        min_value=0,
+        max_value=10,
+        value=0,
+        help="Channel used for nucleus segmentation (usually DAPI/Hoechst)"
+    )
+    
+    cellpose_diameter = st.number_input(
+        "Expected nucleus diameter (pixels)",
+        min_value=10,
+        max_value=1000,
+        value=300,
+        help="Approximate diameter of nuclei in pixels"
+    )
+    
+    exclude_border = st.checkbox(
+        "Exclude border-touching nuclei",
+        value=True,
+        help="Remove nuclei that touch the image edge"
+    )
+    
+    st.markdown("### Visualization")
+    col_v1, col_v2 = st.columns(2)
+        
+    with col_v1:
+        box_size_um = st.number_input(
+            "Crop box size (µm)",
+            min_value=5.0,
+            max_value=100.0,
+            value=20.0,
+            step=1.0,
+        )
+        
+        scale_bar_um = st.number_input(
+            "Scale bar length (µm)",
+            min_value=1.0,
+            max_value=50.0,
+            value=5.0,
+            step=1.0,
+            )
+    
+    with col_v2:
+        rows_per_page = st.number_input(
+            "Rows per column",
+            min_value=1,
+            max_value=20,
+            value=10,
+        )
+        
+        nucleus_cols = st.number_input(
+            "Columns per page",
+            min_value=1,
+            max_value=5,
+            value=3,
+        )
+    
+    show_outline = st.checkbox(
+        "Show nucleus outlines",
+        value=True,
+        help="Draw dashed outline around each nucleus"
+    )
+    
+    st.markdown("### Contrast Normalization")
+    st.markdown("**Per-channel contrast percentiles**")
+    st.caption("Set low and high percentiles for each channel. Leave empty to use defaults (0.5, 99.5).")
+    
+    # Dynamic channel contrast inputs
+    n_contrast_channels = st.number_input(
+        "Number of channels to configure",
+        min_value=1,
+        max_value=8,
+        value=2,
+        help="Number of channels in your images"
+    )
+    
+    contrast_percentiles = []
+    for ch in range(n_contrast_channels):
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            low = st.number_input(
+                f"Ch{ch} low %",
+                min_value=0.0,
+                max_value=50.0,
+                value=0.5,
+                step=2.0,
+                key=f"contrast_low_{ch}"
+            )
+        with col_c2:
+            high = st.number_input(
+                f"Ch{ch} high %",
+                min_value=50.0,
+                max_value=100.0,
+                value=99.8,
+                step=0.5,
+                key=f"contrast_high_{ch}"
+            )
+        contrast_percentiles.append((low, high))
+
+# Channel colors section
+st.divider()
+st.header("🎨 Channel Colors")
+
+col_colors = st.columns(min(n_contrast_channels, 4))
+color_options = ["gray", "green", "magenta", "cyan", "red", "blue", "yellow", "orange", "white"]
+
+channel_colors = []
+for ch in range(n_contrast_channels):
+    with col_colors[ch % len(col_colors)]:
+        color = st.selectbox(
+            f"Channel {ch}",
+            options=color_options,
+            index=min(ch + 1, len(color_options) - 1),  # Default to different colors
+            key=f"color_{ch}"
+        )
+        channel_colors.append(color)
+
+# Visible channels
+st.divider()
+visible_channels_enabled = True
+
+if visible_channels_enabled:
+    visible_channels = st.multiselect(
+        "Channels to display",
+        options=list(range(n_contrast_channels)),
+        default=list(range(n_contrast_channels)),
+        format_func=lambda x: f"Channel {x}"
+    )
+else:
+    visible_channels = None
+
+# Generate button
+st.divider()
+
+# Validation
+ready_to_run = len(czi_files) > 0 and len(genotypes) > 0 and output_dir
+
+if not input_dir:
+    st.warning("⚠️ Please enter an input directory path")
+elif not czi_files:
+    st.warning("⚠️ No CZI files found in the input directory")
+if not genotypes or genotype_matches is False:
+    st.warning("⚠️ Please enter at least one genotype that matches your files")
+if not output_dir:
+    st.warning("⚠️ Please enter an output directory path")
+
+# Run button
+if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run, use_container_width=True):
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create config
+    config = ReportConfig(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        genotypes=genotypes,
+        nuclear_channel=nuclear_channel,
+        cellpose_diameter=cellpose_diameter,
+        exclude_border=exclude_border,
+        box_size_um=box_size_um,
+        scale_bar_um=scale_bar_um,
+        rows_per_page=rows_per_page,
+        nucleus_cols=nucleus_cols,
+        show_outline=show_outline,
+        contrast_percentiles=contrast_percentiles if contrast_percentiles else None,
+        channel_colors=channel_colors if channel_colors else None,
+        visible_channels=visible_channels,
+    )
+    
+    # Run report generation
+    status_container = st.container()
+    
+    with status_container:
+        st.info("🔄 Processing... This may take a few minutes for large files.")
+        
+        # Capture stdout for progress updates
+        import io
+        from contextlib import redirect_stdout
+        
+        output_capture = io.StringIO()
+        
+        try:
+            with redirect_stdout(output_capture):
+                generate_qc_report(config)
+            
+            st.success("✅ Reports generated successfully!")
+            
+            # Show processing log
+            with st.expander("View processing log"):
+                st.code(output_capture.getvalue())
+            
+            # List generated files
+            output_files = list(Path(output_dir).glob("*"))
+            pdf_files = [f for f in output_files if f.suffix == ".pdf"]
+            
+            if pdf_files:
+                st.subheader("📄 Generated Reports")
+                st.markdown(f"**Output location:** `{output_dir}`")
+                
+                # List files
+                for pdf_file in pdf_files:
+                    size_mb = pdf_file.stat().st_size / (1024 * 1024)
+                    st.markdown(f"- 📄 **{pdf_file.name}** ({size_mb:.1f} MB)")
+                
+                csv_files = [f for f in output_files if f.suffix == ".csv"]
+                for csv_file in csv_files:
+                    st.markdown(f"- 📊 **{csv_file.name}**")
+                
+                json_files = [f for f in output_files if f.suffix == ".json"]
+                for json_file in json_files:
+                    st.markdown(f"- 📋 **{json_file.name}**")
+                
+                # Open folder button hint
+                st.info(f"📂 Open your file browser to: `{output_dir}`")
+                
+            else:
+                st.warning("No PDF reports were generated. Check the processing log for details.")
+                
+        except Exception as e:
+            st.error(f"❌ Error during processing: {str(e)}")
+            with st.expander("View error details"):
+                import traceback
+                st.code(traceback.format_exc())
+            with st.expander("View processing log"):
+                st.code(output_capture.getvalue())
+
+# Footer
+st.divider()
+st.caption("Happy imaging! 🔬 Please report any issues to the GitHub repository.")

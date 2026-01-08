@@ -1,0 +1,255 @@
+"""
+Nucleus extraction from Cellpose segmentation masks.
+
+Converts segmentation masks into CropMetadata objects compatible
+with the existing figure generation workflow.
+"""
+
+import numpy as np
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from rep_image_workflow import CropMetadata, ChannelContrast
+
+
+@dataclass
+class NucleusCrop:
+    """
+    Extended crop metadata for automated nucleus extraction.
+    
+    Extends the standard CropMetadata with additional segmentation-derived info.
+    """
+    crop_meta: CropMetadata
+    nucleus_id: int  # Original ID from segmentation mask
+    genotype: str
+    source_filename: str
+    centroid_um: tuple[float, float]  # (y, x) in microns
+    area_um2: float
+    area_pixels: int
+    unique_id: str  # Format: {genotype}_{filename}_{nuc_id:04d}
+    
+    def __post_init__(self):
+        """Update crop_meta.crop_id to match unique_id."""
+        self.crop_meta.crop_id = self.unique_id
+
+
+def is_border_touching(mask: np.ndarray, nucleus_id: int) -> bool:
+    """
+    Check if a nucleus touches the image boundary.
+    
+    Args:
+        mask: Segmentation mask array (H, W)
+        nucleus_id: Label ID to check
+        
+    Returns:
+        True if nucleus touches any edge
+    """
+    nucleus_coords = np.where(mask == nucleus_id)
+    if len(nucleus_coords[0]) == 0:
+        return True  # Empty nucleus, consider invalid
+    
+    y_coords, x_coords = nucleus_coords
+    h, w = mask.shape
+    
+    touches_edge = (
+        np.any(y_coords == 0) or 
+        np.any(y_coords == h - 1) or
+        np.any(x_coords == 0) or 
+        np.any(x_coords == w - 1)
+    )
+    return touches_edge
+
+
+def compute_nucleus_centroid(mask: np.ndarray, nucleus_id: int) -> tuple[int, int]:
+    """
+    Compute the centroid of a nucleus in pixel coordinates.
+    
+    Args:
+        mask: Segmentation mask
+        nucleus_id: Label ID
+        
+    Returns:
+        (y, x) centroid in pixels
+    """
+    nucleus_coords = np.where(mask == nucleus_id)
+    centroid_y = int(np.mean(nucleus_coords[0]))
+    centroid_x = int(np.mean(nucleus_coords[1]))
+    return (centroid_y, centroid_x)
+
+
+def compute_nucleus_area(mask: np.ndarray, nucleus_id: int) -> int:
+    """
+    Compute the area of a nucleus in pixels.
+    
+    Args:
+        mask: Segmentation mask
+        nucleus_id: Label ID
+        
+    Returns:
+        Area in pixels
+    """
+    return int(np.sum(mask == nucleus_id))
+
+
+def extract_nuclei_from_mask(
+    mask: np.ndarray,
+    image_data: np.ndarray,
+    source_filename: str,
+    genotype: str,
+    box_size_um: float,
+    pixel_size_um: tuple[float, float],
+    channel_wavelengths: list[dict],
+    channel_colors: list[str],
+    visible_channels: Optional[list[int]] = None,
+    exclude_border: bool = True,
+    existing_ids: Optional[set[str]] = None,
+) -> list[NucleusCrop]:
+    """
+    Extract NucleusCrop objects from a segmentation mask.
+    
+    Args:
+        mask: Segmentation mask array (H, W) with integer labels
+        image_data: Max-projected image data in CYX format
+        source_filename: Name of source file (without extension)
+        genotype: Genotype label for this image
+        box_size_um: Size of crop box in microns
+        pixel_size_um: (y, x) pixel sizes in microns
+        channel_wavelengths: List of wavelength dicts from CZI metadata
+        channel_colors: List of color strings from CZI metadata
+        visible_channels: Which channels to include (None = all)
+        exclude_border: Whether to exclude border-touching nuclei
+        existing_ids: Set of already-used unique IDs to avoid duplicates
+        
+    Returns:
+        List of NucleusCrop objects
+    """
+    if existing_ids is None:
+        existing_ids = set()
+    
+    pixel_size_y, pixel_size_x = pixel_size_um
+    
+    # Calculate box size in pixels
+    box_height_px = int(np.ceil(box_size_um / pixel_size_y))
+    box_width_px = int(np.ceil(box_size_um / pixel_size_x))
+    
+    # Get all nucleus IDs (exclude background = 0)
+    nucleus_ids = np.unique(mask)
+    nucleus_ids = nucleus_ids[nucleus_ids != 0]
+    
+    # Determine visible channels
+    n_channels = image_data.shape[0]
+    if visible_channels is None:
+        visible_channels = list(range(n_channels))
+    
+    # Placeholder contrast (will be replaced by global contrast later)
+    placeholder_contrasts = [
+        ChannelContrast(min_val=0.0, max_val=65535.0)
+        for _ in range(n_channels)
+    ]
+    
+    nucleus_crops = []
+    
+    for nuc_id in nucleus_ids:
+        # Check border exclusion
+        if exclude_border and is_border_touching(mask, nuc_id):
+            continue
+        
+        # Compute centroid and area
+        centroid_y_px, centroid_x_px = compute_nucleus_centroid(mask, nuc_id)
+        area_pixels = compute_nucleus_area(mask, nuc_id)
+        
+        # Check if crop box would be fully within image bounds
+        h, w = mask.shape
+        half_h = box_height_px // 2
+        half_w = box_width_px // 2
+        
+        # Skip if crop would extend beyond image
+        if (centroid_y_px - half_h < 0 or centroid_y_px + half_h > h or
+            centroid_x_px - half_w < 0 or centroid_x_px + half_w > w):
+            continue
+        
+        # Convert to physical coordinates
+        centroid_y_um = centroid_y_px * pixel_size_y
+        centroid_x_um = centroid_x_px * pixel_size_x
+        area_um2 = area_pixels * pixel_size_y * pixel_size_x
+        
+        # Generate unique ID
+        base_id = f"{genotype}_{source_filename}_{nuc_id:04d}"
+        unique_id = base_id
+        counter = 1
+        while unique_id in existing_ids:
+            unique_id = f"{base_id}_{counter}"
+            counter += 1
+        existing_ids.add(unique_id)
+        
+        # Create CropMetadata
+        crop_meta = CropMetadata(
+            source_file=source_filename,
+            source_name=source_filename,
+            center_pixel=(centroid_y_px, centroid_x_px),
+            box_size_pixels=(box_height_px, box_width_px),
+            center_physical_um=(centroid_y_um, centroid_x_um),
+            box_size_physical_um=box_size_um,
+            pixel_size_um=(pixel_size_y, pixel_size_x),
+            z_range=(0, 1),  # Already max-projected
+            z_projection="max",
+            channel_contrasts=placeholder_contrasts,
+            channel_wavelengths=channel_wavelengths,
+            channel_colors_original=channel_colors,
+            visible_channels=visible_channels,
+            timestamp=datetime.now().isoformat(),
+            notes=f"Auto-extracted nucleus {nuc_id}",
+            crop_id=unique_id,
+        )
+        
+        # Create NucleusCrop
+        nucleus_crop = NucleusCrop(
+            crop_meta=crop_meta,
+            nucleus_id=nuc_id,
+            genotype=genotype,
+            source_filename=source_filename,
+            centroid_um=(centroid_y_um, centroid_x_um),
+            area_um2=area_um2,
+            area_pixels=area_pixels,
+            unique_id=unique_id,
+        )
+        
+        nucleus_crops.append(nucleus_crop)
+    
+    return nucleus_crops
+
+
+def extract_crop_data(
+    image_data: np.ndarray,
+    crop_meta: CropMetadata,
+) -> np.ndarray:
+    """
+    Extract crop data from max-projected image using CropMetadata.
+    
+    Args:
+        image_data: Max-projected image in CYX format
+        crop_meta: Crop metadata with center and size info
+        
+    Returns:
+        Cropped array in CYX format
+    """
+    center_y, center_x = crop_meta.center_pixel
+    box_h, box_w = crop_meta.box_size_pixels
+    
+    # Calculate bounds
+    y_start = center_y - box_h // 2
+    y_end = y_start + box_h
+    x_start = center_x - box_w // 2
+    x_end = x_start + box_w
+    
+    # Clip to image bounds (should already be valid from extraction)
+    y_start = max(0, y_start)
+    y_end = min(image_data.shape[1], y_end)
+    x_start = max(0, x_start)
+    x_end = min(image_data.shape[2], x_end)
+    
+    return image_data[:, y_start:y_end, x_start:x_end]

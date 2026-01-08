@@ -1,0 +1,16 @@
+name: figure-gen
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - numpy
+  - matplotlib
+  - scikit-image
+  - scipy
+  - tifffile
+  - aicspylibczi
+  - cellpose
+  - napari
+  - streamlit
+  - pip
