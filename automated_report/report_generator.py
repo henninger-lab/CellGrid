@@ -155,7 +155,7 @@ def load_or_compute_max_projection(
     
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
-        tifffile.imwrite(cache_file, max_proj, compression=('zstd', 6))
+        tifffile.imwrite(cache_file, max_proj, compression='zstd', compressionargs={'level': 6})
         print(f"  Cached to: {cache_file}")
     
     return max_proj, czi

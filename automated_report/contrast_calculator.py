@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from rep_image_workflow import ChannelContrast
+from .utilities import ChannelContrast
 
 from .nucleus_extractor import NucleusCrop, extract_crop_data
 

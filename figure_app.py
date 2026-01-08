@@ -23,13 +23,13 @@ genotype_matches = None
 
 # Page config
 st.set_page_config(
-    page_title="Microscopy QC Report Generator",
+    page_title="CellGrid Figure Generator",
     page_icon="🔬",
     layout="wide",
 )
 
 # Title and description
-st.title("🔬 Automated QC Report Generator")
+st.title("🔬 CellGrid Figure Generator")
 st.markdown("""
 Generate quality single cell comparison figures from CZI microscopy files with automated 
 nucleus segmentation, contrast normalization, and PDF export.
