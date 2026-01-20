@@ -100,66 +100,80 @@ class CziImage:
         """Allow setting shape."""
         self._shape = value
     
-    def zmax(self):
+    def zmax(self, time_index=0):
         """
         Returns max projection along Z axis.
-        This method is optimized to work without loading the entire image.
+        For timelapse data, uses the specified time index (default: first frame).
+        Returns data in CYX format.
         """
-        # For max projection, we can read the image and compute max
         full_image, _ = self.czi.read_image()
         
-        # First, squeeze to remove singleton dimensions
-        squeezed = np.squeeze(full_image)
+        # Build axis mapping for the full image
+        axis_map = {dim: i for i, dim in enumerate(self.dims)}
+        current_shape = list(full_image.shape)
         
-        # Now determine the axis order in the squeezed array
-        # Build a mapping from original dims to squeezed dims
-        squeezed_dims = []
-        for i, dim_name in enumerate(self.dims):
-            if self.size[i] > 1:  # Only keep non-singleton dimensions
-                squeezed_dims.append(dim_name)
+        # Handle Time dimension - select single timepoint
+        if 'T' in axis_map:
+            t_axis = axis_map['T']
+            t_size = current_shape[t_axis]
+            if t_size > 1:
+                print(f"  Timelapse detected ({t_size} frames), using frame {time_index}")
+            full_image = np.take(full_image, min(time_index, t_size - 1), axis=t_axis)
+            # Remove T from axis_map and shift indices
+            del axis_map['T']
+            axis_map = {k: (v if v < t_axis else v - 1) for k, v in axis_map.items()}
         
-        # Find Z axis and C axis indices in the squeezed array
-        z_axis = None
-        c_axis = None
-        for i, dim_name in enumerate(squeezed_dims):
-            if dim_name == 'Z':
-                z_axis = i
-            if dim_name == 'C':
-                c_axis = i
+        # Handle Scene/Block/Mosaic and other extra dimensions - take first
+        for dim in ['S', 'B', 'M', 'H', 'V', 'I', 'R']:
+            if dim in axis_map:
+                dim_axis = axis_map[dim]
+                dim_size = full_image.shape[dim_axis]
+                if dim_size > 1:
+                    print(f"  Multiple {dim} detected ({dim_size}), using first")
+                full_image = np.take(full_image, 0, axis=dim_axis)
+                del axis_map[dim]
+                axis_map = {k: (v if v < dim_axis else v - 1) for k, v in axis_map.items()}
         
-        if z_axis is not None:
-            # Take max along Z axis
-            max_proj = np.max(squeezed, axis=z_axis)
-            
-            # Now max_proj should have C, Y, X (in some order)
-            # After removing Z, adjust c_axis if needed
-            if c_axis is not None and c_axis > z_axis:
-                c_axis -= 1
-            
-            # Ensure we have CYX format
-            if max_proj.ndim == 3:
-                # Should be CYX already if we removed Z correctly
-                # But let's verify by checking if C is in the right position
-                if c_axis == 0:
-                    return max_proj  # Already CYX
-                else:
-                    # Need to move C to front
-                    return np.moveaxis(max_proj, c_axis, 0)
-            elif max_proj.ndim == 2:
-                # Single channel: YX -> CYX
-                return max_proj[np.newaxis, :, :]
+        # Now we should have CZYX or subset
+        # Find Z axis and do max projection
+        if 'Z' in axis_map:
+            z_axis = axis_map['Z']
+            z_size = full_image.shape[z_axis]
+            if z_size > 1:
+                print(f"  Computing max projection over {z_size} Z-slices")
+                max_proj = np.max(full_image, axis=z_axis)
             else:
-                return max_proj
+                max_proj = np.take(full_image, 0, axis=z_axis)
+            del axis_map['Z']
+            axis_map = {k: (v if v < z_axis else v - 1) for k, v in axis_map.items()}
         else:
-            # No Z dimension or Z=1, just return squeezed without Z
-            if squeezed.ndim == 4:  # CZYX
-                return squeezed[:, 0, :, :]
-            elif squeezed.ndim == 3:  # Already CYX
-                return squeezed
-            elif squeezed.ndim == 2:  # YX
-                return squeezed[np.newaxis, :, :]
-            else:
-                return squeezed
+            max_proj = full_image
+        
+        # Now we should have CYX (or YX if no C)
+        # Ensure C is first axis
+        if 'C' in axis_map:
+            c_axis = axis_map['C']
+            if c_axis != 0:
+                max_proj = np.moveaxis(max_proj, c_axis, 0)
+        else:
+            # No C dimension, add it
+            if max_proj.ndim == 2:
+                max_proj = max_proj[np.newaxis, :, :]
+        
+        # Final shape check - should be (C, Y, X)
+        if max_proj.ndim != 3:
+            print(f"  Warning: unexpected shape {max_proj.shape}, attempting to fix...")
+            # Try to squeeze any remaining singleton dimensions
+            max_proj = np.squeeze(max_proj)
+            if max_proj.ndim == 2:
+                max_proj = max_proj[np.newaxis, :, :]
+            elif max_proj.ndim > 3:
+                # Take first element of extra dimensions
+                while max_proj.ndim > 3:
+                    max_proj = max_proj[0]
+        
+        print(f"  Max projection shape: {max_proj.shape} (CYX)")
+        return max_proj
     
     def get_channel_slice(self, channel):
         """Get a specific channel from the image data."""

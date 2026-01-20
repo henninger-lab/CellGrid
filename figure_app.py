@@ -17,7 +17,7 @@ from datetime import datetime
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from automated_report.report_generator import ReportConfig, generate_qc_report
+from automated_report.report_generator import ReportConfig, generate_qc_report, generate_qc_report_with_progress
 
 genotype_matches = None
 
@@ -56,7 +56,7 @@ with col_left:
     if input_dir and os.path.isdir(input_dir):
         czi_files = glob.glob(os.path.join(input_dir, "*.czi"))
         czi_files.extend(glob.glob(os.path.join(input_dir, "*.CZI")))
-        czi_files = sorted(czi_files)
+        czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
         
         if czi_files:
             st.success(f"✓ Found {len(czi_files)} CZI file(s)")
@@ -293,27 +293,64 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         visible_channels=visible_channels,
     )
     
-    # Run report generation
+    # Run report generation with progress tracking
     status_container = st.container()
     
     with status_container:
-        st.info("🔄 Processing... This may take a few minutes for large files.")
+        # Progress tracking UI
+        overall_progress = st.progress(0, text="Starting...")
+        stage_status = st.status("Initializing pipeline...", expanded=True)
         
-        # Capture stdout for progress updates
-        import io
-        from contextlib import redirect_stdout
+        with stage_status:
+            current_file_text = st.empty()
+            stage_text = st.empty()
+            log_area = st.empty()
         
-        output_capture = io.StringIO()
+        # Create a progress callback class
+        class ProgressTracker:
+            def __init__(self, total_files):
+                self.total_files = max(total_files, 1)
+                self.current_file = 0
+                self.logs = []
+            
+            def update(self, file_idx, filename, stage):
+                self.current_file = file_idx
+                progress = min((file_idx + 1) / self.total_files, 1.0)
+                overall_progress.progress(progress, text=f"File {file_idx + 1} of {self.total_files}")
+                current_file_text.markdown(f"**Current file:** `{filename}`")
+                stage_text.markdown(f"**Stage:** {stage}")
+            
+            def log(self, message):
+                self.logs.append(message)
+                # Show last 15 log entries
+                log_area.code("\n".join(self.logs[-15:]), language=None)
+            
+            def set_stage(self, stage_name):
+                stage_status.update(label=stage_name)
         
         try:
-            with redirect_stdout(output_capture):
-                generate_qc_report(config)
+            # Count matching files
+            matching_files = [f for f in czi_files 
+                           if any(g in os.path.basename(f) for g in genotypes)]
+            
+            if not matching_files:
+                st.error("No files match the specified genotypes!")
+                st.stop()
+            
+            tracker = ProgressTracker(len(matching_files))
+            tracker.set_stage("🔄 Processing files...")
+            
+            # Run with progress tracking
+            generate_qc_report_with_progress(config, tracker)
+            
+            stage_status.update(label="✅ Complete!", state="complete", expanded=False)
+            overall_progress.progress(1.0, text="Done!")
             
             st.success("✅ Reports generated successfully!")
             
             # Show processing log
             with st.expander("View processing log"):
-                st.code(output_capture.getvalue())
+                st.code("\n".join(tracker.logs))
             
             # List generated files
             output_files = list(Path(output_dir).glob("*"))
@@ -343,12 +380,14 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
                 st.warning("No PDF reports were generated. Check the processing log for details.")
                 
         except Exception as e:
+            stage_status.update(label="❌ Error", state="error")
             st.error(f"❌ Error during processing: {str(e)}")
             with st.expander("View error details"):
                 import traceback
                 st.code(traceback.format_exc())
             with st.expander("View processing log"):
-                st.code(output_capture.getvalue())
+                if 'tracker' in dir():
+                    st.code("\n".join(tracker.logs))
 
 # Footer
 st.divider()

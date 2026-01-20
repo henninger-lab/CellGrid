@@ -877,12 +877,22 @@ def generate_qc_report(config: ReportConfig):
     # Find all CZI files
     czi_files = glob.glob(os.path.join(config.input_dir, "*.czi"))
     czi_files.extend(glob.glob(os.path.join(config.input_dir, "*.CZI")))
+    czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
     
     if len(czi_files) == 0:
         print(f"No CZI files found in {config.input_dir}")
         return
     
-    print(f"\nFound {len(czi_files)} CZI files")
+    print(f"\nFound {len(czi_files)} CZI files total")
+    
+    # Filter to only files matching specified genotypes
+    czi_files = [f for f in czi_files if match_genotype(Path(f).stem, config.genotypes) is not None]
+    
+    if len(czi_files) == 0:
+        print(f"No CZI files match the specified genotypes: {config.genotypes}")
+        return
+    
+    print(f"Processing {len(czi_files)} files matching genotypes: {config.genotypes}")
     
     # Process all files
     all_nucleus_crops: dict[str, list[NucleusCrop]] = {g: [] for g in config.genotypes}
@@ -1005,3 +1015,205 @@ def generate_qc_report(config: ReportConfig):
     print("COMPLETE!")
     print("=" * 60)
     print(f"Reports saved to: {config.output_dir}")
+
+
+def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None):
+    """
+    Generate QC report with progress callbacks for UI updates.
+    
+    Args:
+        config: ReportConfig with all settings
+        progress_tracker: Optional object with update(file_idx, filename, stage), 
+                         log(message), and set_stage(name) methods
+    """
+    def log(msg):
+        print(msg)
+        if progress_tracker:
+            progress_tracker.log(msg)
+    
+    def update_progress(idx, name, stage):
+        if progress_tracker:
+            progress_tracker.update(idx, name, stage)
+    
+    def set_stage(name):
+        if progress_tracker:
+            progress_tracker.set_stage(name)
+    
+    log("=" * 60)
+    log("AUTOMATED QC REPORT GENERATOR")
+    log("=" * 60)
+    log(f"Input directory: {config.input_dir}")
+    log(f"Output directory: {config.output_dir}")
+    log(f"Genotypes: {config.genotypes}")
+    log(f"Nuclear channel: {config.nuclear_channel}")
+    log(f"Box size: {config.box_size_um} µm")
+    log("=" * 60)
+    
+    # Create output directory
+    os.makedirs(config.output_dir, exist_ok=True)
+    save_run_parameters(config, config.output_dir)
+    
+    # Find and filter CZI files
+    czi_files = glob.glob(os.path.join(config.input_dir, "*.czi"))
+    czi_files.extend(glob.glob(os.path.join(config.input_dir, "*.CZI")))
+    czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
+    
+    # Filter by genotype BEFORE processing
+    czi_files = [f for f in czi_files 
+                 if match_genotype(Path(f).stem, config.genotypes) is not None]
+    
+    if len(czi_files) == 0:
+        log(f"No CZI files match genotypes: {config.genotypes}")
+        return
+    
+    log(f"Processing {len(czi_files)} files matching genotypes: {config.genotypes}")
+    
+    # Initialize data structures
+    set_stage("🔬 Processing images...")
+    all_nucleus_crops: dict[str, list[NucleusCrop]] = {g: [] for g in config.genotypes}
+    image_data_dict: dict[str, np.ndarray] = {}
+    czi_info_dict: dict[str, CziImage] = {}
+    existing_ids: set[str] = set()
+    
+    cache_dir, seg_dir = get_cache_paths(config)
+    
+    for i, czi_path in enumerate(czi_files):
+        filename = os.path.basename(czi_path)
+        log(f"\n[{i+1}/{len(czi_files)}] {filename}")
+        
+        try:
+            # Stage 1: Load/compute max projection
+            update_progress(i, filename, "📂 Loading image...")
+            max_proj, czi = load_or_compute_max_projection(
+                czi_path, cache_dir, config.use_cache
+            )
+            log(f"  Loaded: {max_proj.shape}")
+            
+            # Stage 2: Segment nuclei
+            update_progress(i, filename, "🧠 Segmenting nuclei...")
+            mask = segment_image(max_proj, czi.name, config, seg_dir)
+            n_nuclei = len(np.unique(mask)) - 1
+            log(f"  Segmented: {n_nuclei} nuclei")
+            
+            # Stage 3: Extract crops
+            update_progress(i, filename, "✂️ Extracting nucleus crops...")
+            genotype = match_genotype(czi.name, config.genotypes)
+            
+            pixel_size_x_um = czi.scale.get('X', 1e-6) * 1e6
+            pixel_size_y_um = czi.scale.get('Y', 1e-6) * 1e6
+            
+            nucleus_crops = extract_nuclei_from_mask(
+                mask=mask,
+                image_data=max_proj,
+                source_filename=czi.name,
+                genotype=genotype,
+                box_size_um=config.box_size_um,
+                pixel_size_um=(pixel_size_y_um, pixel_size_x_um),
+                channel_wavelengths=czi.channel_wavelengths,
+                channel_colors=czi.channel_colors,
+                visible_channels=config.visible_channels,
+                exclude_border=config.exclude_border,
+                existing_ids=existing_ids,
+            )
+            
+            log(f"  Extracted: {len(nucleus_crops)} crops for '{genotype}'")
+            
+            all_nucleus_crops[genotype].extend(nucleus_crops)
+            image_data_dict[czi.name] = max_proj
+            czi_info_dict[czi.name] = czi
+            
+        except Exception as e:
+            log(f"  ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Report summary
+    log("\n" + "=" * 60)
+    log("PROCESSING SUMMARY")
+    log("=" * 60)
+    for genotype in config.genotypes:
+        n_nuclei = len(all_nucleus_crops[genotype])
+        log(f"  {genotype}: {n_nuclei} nuclei")
+    
+    # Generate PDFs
+    set_stage("📄 Generating PDF reports...")
+    log("\n" + "=" * 60)
+    log("GENERATING REPORTS")
+    log("=" * 60)
+    
+    for genotype in config.genotypes:
+        nucleus_crops = all_nucleus_crops[genotype]
+        
+        if len(nucleus_crops) == 0:
+            log(f"\n[{genotype}] No nuclei, skipping")
+            continue
+        
+        log(f"\n[{genotype}] Processing {len(nucleus_crops)} nuclei...")
+        
+        # Compute per-file contrast
+        nuclei_by_file: dict[str, list[NucleusCrop]] = {}
+        for nuc in nucleus_crops:
+            if nuc.source_filename not in nuclei_by_file:
+                nuclei_by_file[nuc.source_filename] = []
+            nuclei_by_file[nuc.source_filename].append(nuc)
+        
+        # Compute and apply contrast per file
+        file_contrast_settings: dict[str, dict[int, tuple[float, float]]] = {}
+        
+        for source_file, file_nuclei in nuclei_by_file.items():
+            image_data = image_data_dict[source_file]
+            
+            contrast_limits = compute_per_file_contrast(
+                image_data,
+                percentiles=config.contrast_percentiles,
+            )
+            
+            file_contrast_settings[source_file] = contrast_limits
+            apply_file_contrast_to_nuclei(file_nuclei, contrast_limits)
+            
+            log(f"  {source_file}: {len(file_nuclei)} nuclei")
+            for ch, (vmin, vmax) in contrast_limits.items():
+                if config.contrast_percentiles and ch < len(config.contrast_percentiles):
+                    pct = config.contrast_percentiles[ch]
+                elif config.contrast_percentiles:
+                    pct = config.contrast_percentiles[-1]
+                else:
+                    pct = (0.5, 99.5)
+                log(f"    Ch{ch} ({pct[0]}-{pct[1]}%): [{vmin:.1f}, {vmax:.1f}]")
+        
+        # Determine color scheme
+        color_scheme = None
+        if config.channel_colors:
+            try:
+                color_scheme = scheme_custom(config.channel_colors, name="Custom_CLI")
+                log(f"  Using custom colors: {config.channel_colors}")
+                for i, lut in enumerate(color_scheme.channel_luts):
+                    log(f"    Ch{i}: {config.channel_colors[i]} -> RGB {lut.color_rgb}")
+            except ValueError as e:
+                log(f"  Warning: Invalid color in {config.channel_colors}: {e}")
+                log(f"  Falling back to auto colors")
+                color_scheme = None
+        
+        # Generate PDF
+        update_progress(len(czi_files) - 1, f"{genotype}_report.pdf", f"📄 Generating {genotype} PDF...")
+        output_path = os.path.join(config.output_dir, f"{genotype}_report.pdf")
+        generate_multipage_pdf(
+            nucleus_crops,
+            image_data_dict,
+            czi_info_dict,
+            genotype,
+            output_path,
+            config,
+            color_scheme=color_scheme,
+        )
+    
+    # Save metadata CSV
+    set_stage("💾 Saving metadata...")
+    csv_path = os.path.join(config.output_dir, "nucleus_metadata.csv")
+    save_metadata_csv(all_nucleus_crops, image_data_dict, csv_path)
+    
+    log("\n" + "=" * 60)
+    log("COMPLETE!")
+    log("=" * 60)
+    log(f"Reports saved to: {config.output_dir}")
