@@ -26,6 +26,7 @@ from scipy.interpolate import splprep, splev
 
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from .parse_czi import CziImage
+from .prefetch import ImagePrefetcher
 from .cellpose_nuclear_seg import segment_nuclei
 from .figure_generator import ( 
     ColorScheme, 
@@ -50,6 +51,53 @@ from .contrast_calculator import (
 )
 
 from .color_schemes import scheme_custom, ColorScheme
+
+
+import time
+class PipelineTimer:
+    """Simple timer for profiling pipeline stages."""
+    
+    def __init__(self):
+        self.times = {}  # stage -> list of durations
+        self._start = None
+        self._stage = None
+    
+    def start(self, stage: str):
+        """Start timing a stage."""
+        self._stage = stage
+        self._start = time.perf_counter()
+    
+    def stop(self):
+        """Stop timing and record duration."""
+        if self._start is None:
+            return
+        duration = time.perf_counter() - self._start
+        if self._stage not in self.times:
+            self.times[self._stage] = []
+        self.times[self._stage].append(duration)
+        self._start = None
+        return duration
+    
+    def print_summary(self):
+        """Print timing summary."""
+        print("\n" + "=" * 60)
+        print("PIPELINE TIMING SUMMARY")
+        print("=" * 60)
+        
+        total_per_image = 0
+        for stage, durations in self.times.items():
+            mean = sum(durations) / len(durations)
+            total_per_image += mean
+            if len(durations) > 1:
+                std = (sum((d - mean) ** 2 for d in durations) / len(durations)) ** 0.5
+                print(f"  {stage:25s}: {mean:6.2f}s ± {std:.2f}s  (n={len(durations)})")
+            else:
+                print(f"  {stage:25s}: {mean:6.2f}s")
+        
+        print("-" * 60)
+        print(f"  {'TOTAL PER IMAGE':25s}: {total_per_image:6.2f}s")
+        print("=" * 60)
+    
 
 @dataclass
 class ReportConfig:
@@ -199,28 +247,6 @@ def should_rerun_segmentation(
     return False
 
 
-def save_segmentation_params(
-    seg_dir: str,
-    sample_name: str,
-    config: ReportConfig,
-):
-    """Save segmentation parameters for later comparison."""
-    params_file = os.path.join(seg_dir, f"{sample_name}_params.json")
-    
-    params = {
-        'nuclear_channel': config.nuclear_channel,
-        'cellpose_diameter': config.cellpose_diameter,
-        'cellpose_flow_threshold': config.cellpose_flow_threshold,
-        'cellpose_cellprob_threshold': config.cellpose_cellprob_threshold,
-        'min_area_pixels': config.min_area_pixels,
-        'max_area_pixels': config.max_area_pixels,
-        'timestamp': datetime.now().isoformat(),
-    }
-    
-    with open(params_file, 'w') as f:
-        json.dump(params, f, indent=2)
-
-
 def segment_image(
     max_proj: np.ndarray,
     sample_name: str,
@@ -258,9 +284,9 @@ def segment_image(
         verbose=True,
     )
     
-    # Save parameters for future comparison
+    # Need for knowing when to use cached segmentation
     save_segmentation_params(seg_dir, sample_name, config)
-    
+
     return mask
 
 
@@ -838,12 +864,14 @@ def save_metadata_csv(
         print(f"Saved metadata: {output_path}")
 
 
-def save_run_parameters(config: ReportConfig, output_dir: str):
+def save_run_parameters(config: ReportConfig, output_dir: str, timestamp: Optional[str] = None):
     """Save all run parameters to JSON file."""
-    params_file = os.path.join(output_dir, "run_parameters.json")
+    if timestamp is None:
+        timestamp = datetime.now().isoformat()
+    params_file = os.path.join(output_dir, f"run_parameters_{timestamp}.json")
     
     params = config.to_dict()
-    params['run_timestamp'] = datetime.now().isoformat()
+    params['run_timestamp'] = timestamp
     
     with open(params_file, 'w') as f:
         json.dump(params, f, indent=2)
@@ -1051,7 +1079,8 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     
     # Create output directory
     os.makedirs(config.output_dir, exist_ok=True)
-    save_run_parameters(config, config.output_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_run_parameters(config, config.output_dir, timestamp=timestamp)
     
     # Find and filter CZI files
     czi_files = glob.glob(os.path.join(config.input_dir, "*.czi"))
@@ -1076,7 +1105,17 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     existing_ids: set[str] = set()
     
     cache_dir, seg_dir = get_cache_paths(config)
-    
+
+    # Initialize prefetcher
+    prefetcher = ImagePrefetcher(
+        czi_files=czi_files,
+        cache_dir=cache_dir,
+        use_cache=config.use_cache,
+        prefetch_count=2,
+    )
+
+    timer = PipelineTimer()
+
     for i, czi_path in enumerate(czi_files):
         filename = os.path.basename(czi_path)
         log(f"\n[{i+1}/{len(czi_files)}] {filename}")
@@ -1084,19 +1123,22 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
         try:
             # Stage 1: Load/compute max projection
             update_progress(i, filename, "📂 Loading image...")
-            max_proj, czi = load_or_compute_max_projection(
-                czi_path, cache_dir, config.use_cache
-            )
+            timer.start("1. Load/projection")
+            max_proj, czi = prefetcher.get(czi_path)
+            timer.stop()
             log(f"  Loaded: {max_proj.shape}")
             
             # Stage 2: Segment nuclei
             update_progress(i, filename, "🧠 Segmenting nuclei...")
+            timer.start("2. Segment nuclei")
             mask = segment_image(max_proj, czi.name, config, seg_dir)
+            timer.stop()
             n_nuclei = len(np.unique(mask)) - 1
             log(f"  Segmented: {n_nuclei} nuclei")
             
             # Stage 3: Extract crops
             update_progress(i, filename, "✂️ Extracting nucleus crops...")
+            timer.start("3. Extract crops")
             genotype = match_genotype(czi.name, config.genotypes)
             
             pixel_size_x_um = czi.scale.get('X', 1e-6) * 1e6
@@ -1115,7 +1157,8 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
                 exclude_border=config.exclude_border,
                 existing_ids=existing_ids,
             )
-            
+            timer.stop()
+
             log(f"  Extracted: {len(nucleus_crops)} crops for '{genotype}'")
             
             all_nucleus_crops[genotype].extend(nucleus_crops)
@@ -1127,7 +1170,10 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             import traceback
             traceback.print_exc()
             continue
-    
+
+    prefetcher.shutdown()
+    prefetcher.print_stats()
+    timer.print_summary()
     # Report summary
     log("\n" + "=" * 60)
     log("PROCESSING SUMMARY")
@@ -1197,7 +1243,7 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
         
         # Generate PDF
         update_progress(len(czi_files) - 1, f"{genotype}_report.pdf", f"📄 Generating {genotype} PDF...")
-        output_path = os.path.join(config.output_dir, f"{genotype}_report.pdf")
+        output_path = os.path.join(config.output_dir, f"{genotype}_report_{timestamp}.pdf")
         generate_multipage_pdf(
             nucleus_crops,
             image_data_dict,
@@ -1217,3 +1263,24 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     log("COMPLETE!")
     log("=" * 60)
     log(f"Reports saved to: {config.output_dir}")
+
+def save_segmentation_params(
+    seg_dir: str,
+    sample_name: str,
+    config: ReportConfig,
+):
+    """Save segmentation parameters for later comparison."""
+    params_file = os.path.join(seg_dir, f"{sample_name}_params.json")
+    
+    params = {
+        'nuclear_channel': config.nuclear_channel,
+        'cellpose_diameter': config.cellpose_diameter,
+        'cellpose_flow_threshold': config.cellpose_flow_threshold,
+        'cellpose_cellprob_threshold': config.cellpose_cellprob_threshold,
+        'min_area_pixels': config.min_area_pixels,
+        'max_area_pixels': config.max_area_pixels,
+        'timestamp': datetime.now().isoformat(),
+    }
+    
+    with open(params_file, 'w') as f:
+        json.dump(params, f, indent=2)

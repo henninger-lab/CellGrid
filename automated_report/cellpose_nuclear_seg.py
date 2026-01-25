@@ -13,6 +13,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 from cellpose import models, plot, io
 import tifffile
+
+_cellpose_model = None
+
+def get_cellpose_model():
+    """Get or create the Cellpose model (singleton pattern)."""
+    global _cellpose_model
+    if _cellpose_model is None:
+        print("  Loading Cellpose model (one-time)...")
+        _cellpose_model = models.CellposeModel(pretrained_model='cpsam', gpu=True)
+        io.logger_setup()
+    return _cellpose_model
+
+
 def segment_nuclei(img, sample_name, save_dir='./nucleus_seg/', diameter=200, 
                 min_area=5000, max_area=500000, flow_threshold=0.9, 
                 cellprob_threshold=-0.3, save_mask_tiff=False, verbose=True):
@@ -46,9 +59,9 @@ def run_cellpose_2D(img, sample_name, params):
     """
     Run Cellpose on a single image - updated for v4
     """
-    # Use the new CPSAM model for best performance
-    model = models.CellposeModel(pretrained_model='cpsam', gpu=True)
-    io.logger_setup()
+    model = get_cellpose_model()
+ 
+    
     
     eval_params = {
         'flow_threshold': params.flow_threshold,
@@ -93,7 +106,7 @@ def run_cellpose_2D(img, sample_name, params):
         
 
     plt.tight_layout(pad=1.5)
-    plt.savefig(os.path.join(params.output_path, sample_name + '_seg.png'), dpi=300)
+    plt.savefig(os.path.join(params.output_path, sample_name + '_seg.png'), dpi=150)
     plt.close()
     if params.verbose:
         print(f"Processed {sample_name}: found {np.max(temp_mask)} nuclei")
@@ -102,22 +115,32 @@ def run_cellpose_2D(img, sample_name, params):
 
 def filter_nuclei_outside_size_thresholds(params, mask):
     """
-    Filter out small and large objects
+    Filter out small and large objects - optimized version.
+    
+    Uses np.bincount for O(pixels) complexity instead of O(n_nuclei × pixels).
     """
     filtered_mask = mask.copy()
-    num_of_nuclei = np.max(filtered_mask)
-    tooBig = 0
-    tooSmall = 0
-    for n in np.arange(1, num_of_nuclei + 1):
-        nuc_area = np.sum(filtered_mask == n)
-        if nuc_area < params.min_area:
-            filtered_mask[filtered_mask == n] = 0
-            tooSmall += 1
-        elif nuc_area > params.max_area:
-            filtered_mask[filtered_mask == n] = 0
-            tooBig += 1
+    
+    # Compute area of all labels in ONE pass through the image
+    # bincount[i] = number of pixels with value i
+    areas = np.bincount(filtered_mask.ravel())
+    
+    # Find labels outside size thresholds (skip background at index 0)
+    too_small = np.where((areas < params.min_area) & (np.arange(len(areas)) > 0))[0]
+    too_big = np.where((areas > params.max_area) & (np.arange(len(areas)) > 0))[0]
+    
+    # Remove invalid labels
+    labels_to_remove = np.concatenate([too_small, too_big])
+    if len(labels_to_remove) > 0:
+        # Create a lookup table: valid labels keep their value, invalid become 0
+        lut = np.arange(len(areas), dtype=filtered_mask.dtype)
+        lut[labels_to_remove] = 0
+        filtered_mask = lut[filtered_mask]
+    
     if params.verbose:
-        print(f"Filtered out {tooBig + tooSmall} total puncta. {tooBig} were too big and {tooSmall} were too small.")
+        print(f"Filtered out {len(labels_to_remove)} total puncta. "
+              f"{len(too_big)} were too big and {len(too_small)} were too small.")
+    
     return filtered_mask
 
 

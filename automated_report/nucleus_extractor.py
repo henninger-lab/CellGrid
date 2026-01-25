@@ -6,6 +6,7 @@ with the existing figure generation workflow.
 """
 
 import numpy as np
+from skimage import measure
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -18,22 +19,17 @@ from .utilities import CropMetadata, ChannelContrast
 
 @dataclass
 class NucleusCrop:
-    """
-    Extended crop metadata for automated nucleus extraction.
-    
-    Extends the standard CropMetadata with additional segmentation-derived info.
-    """
+    """Extended crop metadata for automated nucleus extraction."""
     crop_meta: CropMetadata
-    nucleus_id: int  # Original ID from segmentation mask
+    nucleus_id: int
     genotype: str
     source_filename: str
-    centroid_um: tuple[float, float]  # (y, x) in microns
+    centroid_um: tuple[float, float]
     area_um2: float
     area_pixels: int
-    unique_id: str  # Format: {genotype}_{filename}_{nuc_id:04d}
+    unique_id: str
     
     def __post_init__(self):
-        """Update crop_meta.crop_id to match unique_id."""
         self.crop_meta.crop_id = self.unique_id
 
 
@@ -111,63 +107,55 @@ def extract_nuclei_from_mask(
     """
     Extract NucleusCrop objects from a segmentation mask.
     
-    Args:
-        mask: Segmentation mask array (H, W) with integer labels
-        image_data: Max-projected image data in CYX format
-        source_filename: Name of source file (without extension)
-        genotype: Genotype label for this image
-        box_size_um: Size of crop box in microns
-        pixel_size_um: (y, x) pixel sizes in microns
-        channel_wavelengths: List of wavelength dicts from CZI metadata
-        channel_colors: List of color strings from CZI metadata
-        visible_channels: Which channels to include (None = all)
-        exclude_border: Whether to exclude border-touching nuclei
-        existing_ids: Set of already-used unique IDs to avoid duplicates
-        
-    Returns:
-        List of NucleusCrop objects
+    OPTIMIZED: Uses regionprops for O(pixels) instead of O(n_nuclei × pixels).
     """
     if existing_ids is None:
         existing_ids = set()
     
     pixel_size_y, pixel_size_x = pixel_size_um
+    h, w = mask.shape
     
     # Calculate box size in pixels
     box_height_px = int(np.ceil(box_size_um / pixel_size_y))
     box_width_px = int(np.ceil(box_size_um / pixel_size_x))
-    
-    # Get all nucleus IDs (exclude background = 0)
-    nucleus_ids = np.unique(mask)
-    nucleus_ids = nucleus_ids[nucleus_ids != 0]
+    half_h = box_height_px // 2
+    half_w = box_width_px // 2
     
     # Determine visible channels
     n_channels = image_data.shape[0]
     if visible_channels is None:
         visible_channels = list(range(n_channels))
     
-    # Placeholder contrast (will be replaced by global contrast later)
+    # Placeholder contrast
     placeholder_contrasts = [
         ChannelContrast(min_val=0.0, max_val=65535.0)
         for _ in range(n_channels)
     ]
     
+    # >>> OPTIMIZATION: Compute ALL region properties in ONE pass
+    # This replaces the per-nucleus np.where() calls
+    regions = measure.regionprops(mask)
+    # <
+    
     nucleus_crops = []
     
-    for nuc_id in nucleus_ids:
-        # Check border exclusion
-        if exclude_border and is_border_touching(mask, nuc_id):
-            continue
+    for props in regions:
+        nuc_id = props.label
         
-        # Compute centroid and area
-        centroid_y_px, centroid_x_px = compute_nucleus_centroid(mask, nuc_id)
-        area_pixels = compute_nucleus_area(mask, nuc_id)
+        # >>> OPTIMIZATION: Border check using bounding box (no image scan needed)
+        if exclude_border:
+            min_row, min_col, max_row, max_col = props.bbox
+            if min_row == 0 or min_col == 0 or max_row == h or max_col == w:
+                continue
+        # <
+        
+        # >>> OPTIMIZATION: Centroid and area from pre-computed properties
+        centroid_y_px = int(props.centroid[0])
+        centroid_x_px = int(props.centroid[1])
+        area_pixels = props.area
+        # <
         
         # Check if crop box would be fully within image bounds
-        h, w = mask.shape
-        half_h = box_height_px // 2
-        half_w = box_width_px // 2
-        
-        # Skip if crop would extend beyond image
         if (centroid_y_px - half_h < 0 or centroid_y_px + half_h > h or
             centroid_x_px - half_w < 0 or centroid_x_px + half_w > w):
             continue
@@ -195,7 +183,7 @@ def extract_nuclei_from_mask(
             center_physical_um=(centroid_y_um, centroid_x_um),
             box_size_physical_um=box_size_um,
             pixel_size_um=(pixel_size_y, pixel_size_x),
-            z_range=(0, 1),  # Already max-projected
+            z_range=(0, 1),
             z_projection="max",
             channel_contrasts=placeholder_contrasts,
             channel_wavelengths=channel_wavelengths,
@@ -206,7 +194,6 @@ def extract_nuclei_from_mask(
             crop_id=unique_id,
         )
         
-        # Create NucleusCrop
         nucleus_crop = NucleusCrop(
             crop_meta=crop_meta,
             nucleus_id=nuc_id,

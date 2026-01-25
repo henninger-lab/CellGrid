@@ -206,7 +206,7 @@ with col_right:
             low = st.number_input(
                 f"Ch{ch} low %",
                 min_value=0.0,
-                max_value=50.0,
+                max_value=80.0,
                 value=0.5,
                 step=2.0,
                 key=f"contrast_low_{ch}"
@@ -214,7 +214,7 @@ with col_right:
         with col_c2:
             high = st.number_input(
                 f"Ch{ch} high %",
-                min_value=50.0,
+                min_value=80.0,
                 max_value=100.0,
                 value=99.8,
                 step=0.5,
