@@ -6,7 +6,33 @@ import skimage.io
 import os
 from pathlib import Path
 
-
+def get_fluorophore_name(excitation: float = None, emission: float = None) -> str:
+    """
+    Impute fluorophore name from excitation/emission wavelengths.
+    
+    Args:
+        excitation: Excitation wavelength in nm
+        emission: Emission wavelength in nm
+    
+    Returns:
+        Fluorophore name string
+    """
+    # Use emission as primary, fall back to excitation
+    wl = emission if emission is not None else excitation
+    
+    if wl is None:
+        return "Unknown"
+    
+    # Classify by wavelength ranges
+    if wl < 500:  # Blue
+        return "Hoechst"
+    elif wl < 570:  # Green
+        return "mStayGold"
+    elif wl < 640:  # Red
+        return "mScarlet"
+    else:  # Far-red
+        return "Far-red"
+    
 class CziImage:
     def __init__(self, file_path):
         """
@@ -221,6 +247,15 @@ class CziImage:
                 scale_value = float(distance.find('Value').text)
                 self.scale[axis_id] = scale_value
         
+         # Impute fluorophore names from wavelengths
+        self.channel_fluorophores = []
+        for wl in self.channel_wavelengths:
+            fluor = get_fluorophore_name(wl.get('excitation'), wl.get('emission'))
+            self.channel_fluorophores.append(fluor)
+        
+        
+        print(f'Channel fluorophores: {self.channel_fluorophores}')
+
         print("--- Color data ---")
         print(f'Channel wavelengths: {self.channel_wavelengths}')
         print(f"Channel colors: {self.channel_colors}")

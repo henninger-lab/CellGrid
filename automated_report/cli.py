@@ -16,7 +16,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .report_generator import ReportConfig, generate_qc_report
+from .report_generator import ReportConfig, generate_qc_report_with_progress
 
 
 def main():
@@ -55,6 +55,14 @@ Examples:
         --genotypes WT KO \\
         --nuclear_channel 0 \\
         --visible_channels 1 2
+
+    # Enable colocalization analysis between channels 0 and 1
+    python -m automated_report \\
+        --input_dir ./images/ \\
+        --genotypes WT KO \\
+        --nuclear_channel 0 \\
+        --coloc_channels 0 1 \\
+        --coloc_vmax 0.3
         """
     )
     
@@ -223,6 +231,24 @@ Examples:
         help='Custom cache directory (default: output_dir/cache/)'
     )
     
+    # Colocalization options
+    parser.add_argument(
+        '--coloc_channels',
+        nargs=2,
+        type=int,
+        default=None,
+        metavar=('CH1', 'CH2'),
+        help='Enable colocalization analysis between two channels. '
+             'E.g., --coloc_channels 0 1 to analyze channels 0 and 1.'
+    )
+    parser.add_argument(
+        '--coloc_vmax',
+        type=float,
+        default=0.3,
+        help='Max brightness for colocalization colormap (default: 0.3). '
+             'Lower values = brighter signal.'
+    )
+    
     args = parser.parse_args()
     
     # Parse contrast percentiles
@@ -264,10 +290,13 @@ Examples:
         show_outline=not args.no_outline,
         use_cache=not args.no_cache,
         cache_dir=args.cache_dir,
+        enable_coloc=args.coloc_channels is not None,
+        coloc_channels=tuple(args.coloc_channels) if args.coloc_channels else None,
+        coloc_vmax=args.coloc_vmax,
     )
     
     # Run report generation
-    generate_qc_report(config)
+    generate_qc_report_with_progress(config)
 
 
 if __name__ == "__main__":

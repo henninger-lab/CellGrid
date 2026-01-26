@@ -17,7 +17,7 @@ from datetime import datetime
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from automated_report.report_generator import ReportConfig, generate_qc_report, generate_qc_report_with_progress
+from automated_report.report_generator import ReportConfig, generate_qc_report_with_progress
 
 genotype_matches = None
 
@@ -65,6 +65,36 @@ with col_left:
                     # Show file size
                     size_mb = os.path.getsize(f) / (1024 * 1024)
                     st.text(f"  • {os.path.basename(f)} ({size_mb:.1f} MB)")
+            with st.expander("Channel metadata (from first file)", expanded=True):
+                try:
+                    from automated_report.parse_czi import CziImage
+                    import io
+                    import sys
+                    
+                    # Suppress print output during loading
+                    old_stdout = sys.stdout
+                    try:
+                        sys.stdout = io.StringIO()
+                        sample_czi = CziImage(czi_files[0])
+                    finally:
+                        sys.stdout = old_stdout
+                    
+                    # Display channel info as a table
+                    channel_data = []
+                    for i, (fluor, wl) in enumerate(zip(sample_czi.channel_fluorophores, sample_czi.channel_wavelengths)):
+                        ex = f"{wl['excitation']:.0f} nm" if wl.get('excitation') else "N/A"
+                        em = f"{wl['emission']:.0f} nm" if wl.get('emission') else "N/A"
+                        channel_data.append({
+                            "Channel": i,
+                            "Fluorophore": fluor,
+                            "Excitation": ex,
+                            "Emission": em,
+                        })
+                    
+                    import pandas as pd
+                    st.dataframe(pd.DataFrame(channel_data), hide_index=True, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Could not read channel metadata: {e}")
         else:
             st.warning("No CZI files found in this directory")
     elif input_dir:
@@ -124,7 +154,7 @@ with col_right:
     
     st.markdown("### Segmentation")
     nuclear_channel = st.number_input(
-        "Nuclear channel index",
+        "Nuclear channel index (see fluorophore info to the left)",
         min_value=0,
         max_value=10,
         value=0,
@@ -254,6 +284,59 @@ if visible_channels_enabled:
 else:
     visible_channels = None
 
+# Colocalization section
+st.divider()
+st.header("🔬 Colocalization Analysis")
+st.caption("Compute pixel-wise colocalization heatmap between two channels.")
+
+enable_coloc = st.checkbox(
+    "Enable colocalization heatmap",
+    value=False,
+    help="Add a colocalization panel showing spatial correlation between two channels"
+)
+
+coloc_channels = None
+coloc_vmax = 20.0
+
+if enable_coloc:
+    col_coloc1, col_coloc2 = st.columns(2)
+    
+    with col_coloc1:
+        coloc_ch1 = st.selectbox(
+            "First channel",
+            options=list(range(n_contrast_channels)),
+            index=0,
+            format_func=lambda x: f"Channel {x}",
+            key="coloc_ch1"
+        )
+    
+    with col_coloc2:
+        coloc_ch2 = st.selectbox(
+            "Second channel",
+            options=list(range(n_contrast_channels)),
+            index=min(1, n_contrast_channels - 1),
+            format_func=lambda x: f"Channel {x}",
+            key="coloc_ch2"
+        )
+    
+    if coloc_ch1 == coloc_ch2:
+        st.warning("⚠️ Please select two different channels for colocalization")
+        coloc_channels = None
+    else:
+        coloc_channels = (coloc_ch1, coloc_ch2)
+    
+    coloc_vmax = st.number_input(
+        "Max brightness",
+        min_value=5.0,
+        max_value=100.0,
+        value=20.0,
+        step=5.0,
+        help="Maximum value for colormap scaling. Lower values = brighter colocalization signal."
+    )
+    
+    st.info("ℹ️ Colocalization is computed from the full 3D image before max projection. "
+            "Only positive colocalization is shown (Oslo colormap); background appears black.")
+
 # Generate button
 st.divider()
 
@@ -291,6 +374,9 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         contrast_percentiles=contrast_percentiles if contrast_percentiles else None,
         channel_colors=channel_colors if channel_colors else None,
         visible_channels=visible_channels,
+        enable_coloc=enable_coloc,
+        coloc_channels=coloc_channels,
+        coloc_vmax=coloc_vmax,
     )
     
     # Run report generation with progress tracking

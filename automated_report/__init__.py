@@ -28,7 +28,7 @@ Or use the command-line interface:
 
 from .report_generator import (
     ReportConfig,
-    generate_qc_report,
+    generate_qc_report_with_progress,
     generate_multipage_pdf,
     save_metadata_csv,
 )
@@ -49,11 +49,17 @@ from .contrast_calculator import (
     format_contrast_summary,
 )
 
+from .coloc_heatmap import (
+    compute_coloc_max_projection,
+    render_coloc_heatmap,
+    coloc_heatmap,
+)
+
 
 __all__ = [
     # Main entry points
     'ReportConfig',
-    'generate_qc_report',
+    'generate_qc_report_with_progress',
     
     # PDF generation
     'generate_multipage_pdf',
@@ -72,6 +78,11 @@ __all__ = [
     'apply_global_contrast',
     'compute_per_nucleus_contrast',
     'format_contrast_summary',
+    
+    # Colocalization
+    'compute_coloc_max_projection',
+    'render_coloc_heatmap',
+    'coloc_heatmap',
 ]
 
 __version__ = '1.0.0'

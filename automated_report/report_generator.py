@@ -50,6 +50,11 @@ from .contrast_calculator import (
     format_contrast_summary,
 )
 
+from .coloc_heatmap import (
+    compute_coloc_max_projection,
+    render_coloc_heatmap,
+)
+
 from .color_schemes import scheme_custom, ColorScheme
 
 
@@ -136,6 +141,11 @@ class ReportConfig:
     visible_channels: Optional[list[int]] = None  # None = all
     channel_colors: Optional[list[str]] = None  # None = auto from wavelengths
     
+    # Colocalization settings
+    enable_coloc: bool = False  # Enable colocalization heatmap
+    coloc_channels: Optional[tuple[int, int]] = None  # Channel pair for colocalization
+    coloc_vmax: Optional[float] = None  # Max value for colormap scaling (None = auto)
+    
     # Caching
     use_cache: bool = True
     cache_dir: Optional[str] = None
@@ -207,6 +217,65 @@ def load_or_compute_max_projection(
         print(f"  Cached to: {cache_file}")
     
     return max_proj, czi
+
+
+def compute_colocalization_for_file(
+    czi_path: str,
+    cache_dir: str,
+    coloc_channels: tuple[int, int],
+    use_cache: bool = True,
+) -> np.ndarray:
+    """
+    Compute colocalization heatmap for a CZI file.
+    
+    Must be called with full 4D data (before max projection caching loses Z info).
+    Caches the result for subsequent runs.
+    
+    Args:
+        czi_path: Path to CZI file
+        cache_dir: Directory for caching results
+        coloc_channels: Tuple of (channel1, channel2) for colocalization
+        use_cache: Whether to use/create cached results
+        
+    Returns:
+        coloc_2d: 2D max-projected colocalization heatmap (YX)
+    """
+    czi_name = Path(czi_path).stem
+    ch1, ch2 = coloc_channels
+    cache_file = os.path.join(cache_dir, f"{czi_name}_coloc_ch{ch1}_ch{ch2}.tif")
+    
+    # Check cache first
+    if use_cache and os.path.exists(cache_file):
+        print(f"  Loading cached colocalization: {cache_file}")
+        return tifffile.imread(cache_file)
+    
+    # Need to load full 4D data and compute colocalization
+    print(f"  Computing colocalization for channels {ch1} and {ch2}...")
+    
+    czi = CziImage(czi_path)
+    
+    # Get full 4D image data (CZYX)
+    full_data = czi.image_data  # This loads the full 4D array
+    
+    # Compute colocalization (requires 4D CZYX data)
+    coloc_2d = compute_coloc_max_projection(full_data, coloc_channels)
+    
+    # Cache the result
+    if use_cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        # Convert to float32 for storage (preserves precision)
+        tifffile.imwrite(
+            cache_file, 
+            coloc_2d.astype(np.float32),
+            compression='zstd', 
+            compressionargs={'level': 6}
+        )
+        print(f"  Cached colocalization to: {cache_file}")
+    
+    # Clear memory
+    czi._image_data = None
+    
+    return coloc_2d
 
 
 def should_rerun_segmentation(
@@ -512,6 +581,7 @@ def generate_multipage_pdf(
     config: ReportConfig,
     color_scheme: Optional[ColorScheme] = None,
     mask_dict: Optional[dict[str, np.ndarray]] = None,
+    coloc_data_dict: Optional[dict[str, np.ndarray]] = None,
 ):
     """
     Generate a multi-page PDF report for a genotype.
@@ -528,6 +598,7 @@ def generate_multipage_pdf(
         config: Report configuration
         color_scheme: Color scheme (auto-assigned if None)
         mask_dict: Dict mapping source_filename -> segmentation mask (for outlines)
+        coloc_data_dict: Dict mapping source_filename -> 2D colocalization heatmap
     """
     if len(nucleus_crops) == 0:
         print(f"  No nuclei for genotype '{genotype}', skipping PDF")
@@ -568,7 +639,9 @@ def generate_multipage_pdf(
     # Get channel info from first nucleus
     first_nuc = nucleus_crops_sorted[0]
     active_channels = first_nuc.crop_meta.get_active_channels()
-    images_per_nucleus = len(active_channels) + 1  # channels + merge
+    # channels + merge + coloc (if enabled)
+    has_coloc = coloc_data_dict is not None and len(coloc_data_dict) > 0
+    images_per_nucleus = len(active_channels) + 1 + (1 if has_coloc else 0)
     
     # Get image dimensions
     first_image = image_data_dict[first_nuc.source_filename]
@@ -695,6 +768,25 @@ def generate_multipage_pdf(
                 individual = panel.render_individual_channels()
                 merged = panel.render_merged()
                 all_images = individual + [merged]
+                
+                # Add colocalization panel if enabled
+                if has_coloc and nuc_crop.source_filename in coloc_data_dict:
+                    coloc_full = coloc_data_dict[nuc_crop.source_filename]
+                    # Extract crop from colocalization data using same coordinates
+                    center_y, center_x = nuc_crop.crop_meta.center_pixel
+                    box_h, box_w = nuc_crop.crop_meta.box_size_pixels
+                    y_start = max(0, center_y - box_h // 2)
+                    y_end = min(coloc_full.shape[0], center_y + box_h // 2)
+                    x_start = max(0, center_x - box_w // 2)
+                    x_end = min(coloc_full.shape[1], center_x + box_w // 2)
+                    coloc_crop = coloc_full[y_start:y_end, x_start:x_end]
+                    
+                    # Render colocalization heatmap
+                    coloc_rgb = render_coloc_heatmap(
+                        coloc_crop, 
+                        vmax=config.coloc_vmax,
+                    )
+                    all_images.append(coloc_rgb)
                 
                 pixel_size_um = nuc_crop.crop_meta.pixel_size_um[1]
                 
@@ -878,173 +970,6 @@ def save_run_parameters(config: ReportConfig, output_dir: str, timestamp: Option
     
     print(f"Saved run parameters: {params_file}")
 
-
-def generate_qc_report(config: ReportConfig):
-    """
-    Main entry point: generate automated QC reports.
-    
-    Args:
-        config: ReportConfig with all settings
-    """
-    print("=" * 60)
-    print("AUTOMATED QC REPORT GENERATOR")
-    print("=" * 60)
-    print(f"Input directory: {config.input_dir}")
-    print(f"Output directory: {config.output_dir}")
-    print(f"Genotypes: {config.genotypes}")
-    print(f"Nuclear channel: {config.nuclear_channel}")
-    print(f"Box size: {config.box_size_um} µm")
-    print("=" * 60)
-    
-    # Create output directory
-    os.makedirs(config.output_dir, exist_ok=True)
-    
-    # Save run parameters
-    save_run_parameters(config, config.output_dir)
-    
-    # Find all CZI files
-    czi_files = glob.glob(os.path.join(config.input_dir, "*.czi"))
-    czi_files.extend(glob.glob(os.path.join(config.input_dir, "*.CZI")))
-    czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
-    
-    if len(czi_files) == 0:
-        print(f"No CZI files found in {config.input_dir}")
-        return
-    
-    print(f"\nFound {len(czi_files)} CZI files total")
-    
-    # Filter to only files matching specified genotypes
-    czi_files = [f for f in czi_files if match_genotype(Path(f).stem, config.genotypes) is not None]
-    
-    if len(czi_files) == 0:
-        print(f"No CZI files match the specified genotypes: {config.genotypes}")
-        return
-    
-    print(f"Processing {len(czi_files)} files matching genotypes: {config.genotypes}")
-    
-    # Process all files
-    all_nucleus_crops: dict[str, list[NucleusCrop]] = {g: [] for g in config.genotypes}
-    image_data_dict: dict[str, np.ndarray] = {}
-    czi_info_dict: dict[str, CziImage] = {}
-    existing_ids: set[str] = set()
-    
-    for i, czi_path in enumerate(czi_files):
-        print(f"\n[{i+1}/{len(czi_files)}] Processing: {os.path.basename(czi_path)}")
-        
-        try:
-            nucleus_crops, max_proj, czi = process_single_file(
-                czi_path, config, existing_ids
-            )
-            
-            if len(nucleus_crops) > 0:
-                genotype = nucleus_crops[0].genotype
-                all_nucleus_crops[genotype].extend(nucleus_crops)
-                image_data_dict[czi.name] = max_proj
-                czi_info_dict[czi.name] = czi
-                
-        except Exception as e:
-            print(f"  Error processing {czi_path}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    # Report summary
-    print("\n" + "=" * 60)
-    print("PROCESSING SUMMARY")
-    print("=" * 60)
-    for genotype in config.genotypes:
-        n_nuclei = len(all_nucleus_crops[genotype])
-        print(f"  {genotype}: {n_nuclei} nuclei")
-    
-    # Compute global contrast per genotype and generate PDFs
-    print("\n" + "=" * 60)
-    print("GENERATING REPORTS")
-    print("=" * 60)
-    
-    for genotype in config.genotypes:
-        nucleus_crops = all_nucleus_crops[genotype]
-        
-        if len(nucleus_crops) == 0:
-            print(f"\n[{genotype}] No nuclei, skipping")
-            continue
-        
-        print(f"\n[{genotype}] Processing {len(nucleus_crops)} nuclei...")
-        
-        # Compute per-file contrast (instead of global)
-        # Group nuclei by source file
-        nuclei_by_file: dict[str, list[NucleusCrop]] = {}
-        for nuc in nucleus_crops:
-            if nuc.source_filename not in nuclei_by_file:
-                nuclei_by_file[nuc.source_filename] = []
-            nuclei_by_file[nuc.source_filename].append(nuc)
-        
-        # Compute and apply contrast per file
-        file_contrast_settings: dict[str, dict[int, tuple[float, float]]] = {}
-        
-        for source_file, file_nuclei in nuclei_by_file.items():
-            image_data = image_data_dict[source_file]
-            
-            # Compute contrast from full image with per-channel percentiles
-            contrast_limits = compute_per_file_contrast(
-                image_data,
-                percentiles=config.contrast_percentiles,
-            )
-            
-            file_contrast_settings[source_file] = contrast_limits
-            
-            # Apply to all nuclei from this file
-            apply_file_contrast_to_nuclei(file_nuclei, contrast_limits)
-            
-            # Print contrast info with percentile settings
-            print(f"  {source_file}: {len(file_nuclei)} nuclei")
-            for ch, (vmin, vmax) in contrast_limits.items():
-                if config.contrast_percentiles and ch < len(config.contrast_percentiles):
-                    pct = config.contrast_percentiles[ch]
-                elif config.contrast_percentiles:
-                    pct = config.contrast_percentiles[-1]
-                else:
-                    pct = (0.5, 99.5)
-                print(f"    Ch{ch} ({pct[0]}-{pct[1]}%): [{vmin:.1f}, {vmax:.1f}]")
-        
-        # Determine color scheme
-        color_scheme = None
-        if config.channel_colors:
-            try:
-                # Pass string colors directly to scheme_custom() which has
-                # microscopy-friendly color mapping (e.g., "green" = full brightness)
-                # Do NOT pre-convert with mcolors.to_rgb() which gives dim colors!
-                color_scheme = scheme_custom(config.channel_colors, name="Custom_CLI")
-                print(f"  Using custom colors: {config.channel_colors}")
-                # Debug: show actual RGB values being used
-                for i, lut in enumerate(color_scheme.channel_luts):
-                    print(f"    Ch{i}: {config.channel_colors[i]} -> RGB {lut.color_rgb}")
-            except ValueError as e:
-                print(f"  Warning: Invalid color in {config.channel_colors}: {e}")
-                print(f"  Falling back to auto colors")
-                color_scheme = None
-        
-        # Generate PDF
-        output_path = os.path.join(config.output_dir, f"{genotype}_report.pdf")
-        generate_multipage_pdf(
-            nucleus_crops,
-            image_data_dict,
-            czi_info_dict,
-            genotype,
-            output_path,
-            config,
-            color_scheme=color_scheme,
-        )
-    
-    # Save metadata CSV
-    csv_path = os.path.join(config.output_dir, "nucleus_metadata.csv")
-    save_metadata_csv(all_nucleus_crops, image_data_dict, csv_path)
-    
-    print("\n" + "=" * 60)
-    print("COMPLETE!")
-    print("=" * 60)
-    print(f"Reports saved to: {config.output_dir}")
-
-
 def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None):
     """
     Generate QC report with progress callbacks for UI updates.
@@ -1075,6 +1000,8 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     log(f"Genotypes: {config.genotypes}")
     log(f"Nuclear channel: {config.nuclear_channel}")
     log(f"Box size: {config.box_size_um} µm")
+    if config.enable_coloc and config.coloc_channels:
+        log(f"Colocalization: channels {config.coloc_channels}")
     log("=" * 60)
     
     # Create output directory
@@ -1101,6 +1028,7 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     set_stage("🔬 Processing images...")
     all_nucleus_crops: dict[str, list[NucleusCrop]] = {g: [] for g in config.genotypes}
     image_data_dict: dict[str, np.ndarray] = {}
+    coloc_data_dict: dict[str, np.ndarray] = {}  # Colocalization heatmaps per file
     czi_info_dict: dict[str, CziImage] = {}
     existing_ids: set[str] = set()
     
@@ -1127,6 +1055,20 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             max_proj, czi = prefetcher.get(czi_path)
             timer.stop()
             log(f"  Loaded: {max_proj.shape}")
+            
+            # Stage 1.5: Compute colocalization (if enabled)
+            coloc_data = None
+            if config.enable_coloc and config.coloc_channels is not None:
+                update_progress(i, filename, "🔬 Computing colocalization...")
+                timer.start("1.5 Colocalization")
+                coloc_data = compute_colocalization_for_file(
+                    czi_path=czi_path,
+                    cache_dir=cache_dir,
+                    coloc_channels=config.coloc_channels,
+                    use_cache=config.use_cache,
+                )
+                timer.stop()
+                log(f"  Colocalization computed: {coloc_data.shape}")
             
             # Stage 2: Segment nuclei
             update_progress(i, filename, "🧠 Segmenting nuclei...")
@@ -1163,6 +1105,8 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             
             all_nucleus_crops[genotype].extend(nucleus_crops)
             image_data_dict[czi.name] = max_proj
+            if coloc_data is not None:
+                coloc_data_dict[czi.name] = coloc_data
             czi_info_dict[czi.name] = czi
             
         except Exception as e:
@@ -1252,6 +1196,7 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             output_path,
             config,
             color_scheme=color_scheme,
+            coloc_data_dict=coloc_data_dict if config.enable_coloc else None,
         )
     
     # Save metadata CSV
