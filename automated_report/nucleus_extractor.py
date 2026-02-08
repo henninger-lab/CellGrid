@@ -155,11 +155,6 @@ def extract_nuclei_from_mask(
         area_pixels = props.area
         # <
         
-        # Check if crop box would be fully within image bounds
-        if (centroid_y_px - half_h < 0 or centroid_y_px + half_h > h or
-            centroid_x_px - half_w < 0 or centroid_x_px + half_w > w):
-            continue
-        
         # Convert to physical coordinates
         centroid_y_um = centroid_y_px * pixel_size_y
         centroid_x_um = centroid_x_px * pixel_size_x
@@ -233,10 +228,24 @@ def extract_crop_data(
     x_start = center_x - box_w // 2
     x_end = x_start + box_w
     
-    # Clip to image bounds (should already be valid from extraction)
-    y_start = max(0, y_start)
-    y_end = min(image_data.shape[1], y_end)
-    x_start = max(0, x_start)
-    x_end = min(image_data.shape[2], x_end)
-    
-    return image_data[:, y_start:y_end, x_start:x_end]
+    # Build fixed-size crop and pad with zeros if the box extends beyond image bounds.
+    # This preserves near-edge nuclei instead of dropping them during extraction.
+    n_channels = image_data.shape[0]
+    crop = np.zeros((n_channels, box_h, box_w), dtype=image_data.dtype)
+
+    src_y_start = max(0, y_start)
+    src_y_end = min(image_data.shape[1], y_end)
+    src_x_start = max(0, x_start)
+    src_x_end = min(image_data.shape[2], x_end)
+
+    dst_y_start = src_y_start - y_start
+    dst_y_end = dst_y_start + (src_y_end - src_y_start)
+    dst_x_start = src_x_start - x_start
+    dst_x_end = dst_x_start + (src_x_end - src_x_start)
+
+    if src_y_end > src_y_start and src_x_end > src_x_start:
+        crop[:, dst_y_start:dst_y_end, dst_x_start:dst_x_end] = image_data[
+            :, src_y_start:src_y_end, src_x_start:src_x_end
+        ]
+
+    return crop

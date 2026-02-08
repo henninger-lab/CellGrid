@@ -458,14 +458,24 @@ def extract_nucleus_contour(
     y_end = y_start + box_h
     x_end = x_start + box_w
     
-    # Clip to image bounds
-    y_start = max(0, y_start)
-    x_start = max(0, x_start)
-    y_end = min(mask.shape[0], y_end)
-    x_end = min(mask.shape[1], x_end)
-    
-    # Extract mask crop
-    mask_crop = mask[y_start:y_end, x_start:x_end]
+    # Create a fixed-size crop and pad with background when near edges.
+    # This keeps contour coordinates aligned with padded image crops.
+    mask_crop = np.zeros((box_h, box_w), dtype=mask.dtype)
+
+    src_y_start = max(0, y_start)
+    src_y_end = min(mask.shape[0], y_end)
+    src_x_start = max(0, x_start)
+    src_x_end = min(mask.shape[1], x_end)
+
+    dst_y_start = src_y_start - y_start
+    dst_y_end = dst_y_start + (src_y_end - src_y_start)
+    dst_x_start = src_x_start - x_start
+    dst_x_end = dst_x_start + (src_x_end - src_x_start)
+
+    if src_y_end > src_y_start and src_x_end > src_x_start:
+        mask_crop[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = mask[
+            src_y_start:src_y_end, src_x_start:src_x_end
+        ]
     
     # Create binary mask for this nucleus
     binary_mask = (mask_crop == nucleus_id).astype(np.uint8)
@@ -572,6 +582,54 @@ def draw_nucleus_outline(ax, contour: np.ndarray, color='white', linewidth=1.0, 
         zorder=10,
     )
 
+
+def compute_valid_crop_mask(crop_meta, full_shape: tuple[int, int]) -> np.ndarray:
+    """
+    Compute which pixels in a fixed-size crop come from real image data.
+
+    Returns:
+        Boolean mask of shape (box_h, box_w), True where pixels are from the source image.
+    """
+    full_h, full_w = full_shape
+    center_y, center_x = crop_meta.center_pixel
+    box_h, box_w = crop_meta.box_size_pixels
+
+    y_start = center_y - box_h // 2
+    y_end = y_start + box_h
+    x_start = center_x - box_w // 2
+    x_end = x_start + box_w
+
+    src_y_start = max(0, y_start)
+    src_y_end = min(full_h, y_end)
+    src_x_start = max(0, x_start)
+    src_x_end = min(full_w, x_end)
+
+    dst_y_start = src_y_start - y_start
+    dst_y_end = dst_y_start + (src_y_end - src_y_start)
+    dst_x_start = src_x_start - x_start
+    dst_x_end = dst_x_start + (src_x_end - src_x_start)
+
+    valid = np.zeros((box_h, box_w), dtype=bool)
+    if src_y_end > src_y_start and src_x_end > src_x_start:
+        valid[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = True
+    return valid
+
+
+def apply_padding_color(img: np.ndarray, valid_mask: np.ndarray, pad_color: tuple[int, int, int] = (255, 255, 255)) -> np.ndarray:
+    """
+    Recolor padded pixels to a visible background color for clarity in reports.
+    """
+    if img.ndim != 3 or img.shape[2] != 3:
+        return img
+    if valid_mask.shape != img.shape[:2]:
+        return img
+    if np.all(valid_mask):
+        return img
+
+    out = img.copy()
+    out[~valid_mask] = np.array(pad_color, dtype=out.dtype)
+    return out
+
 def generate_multipage_pdf(
     nucleus_crops: list[NucleusCrop],
     image_data_dict: dict[str, np.ndarray],
@@ -662,22 +720,49 @@ def generate_multipage_pdf(
         )
     )
     
-    # Calculate pagination
+    # Build pages while accounting for file headers that also consume grid slots.
+    # Without this, nuclei can be dropped when headers are inserted at render time.
+    page_entries: list[list[tuple[NucleusCrop, bool]]] = []
     n_nuclei = len(nucleus_crops_sorted)
-    n_pages = (n_nuclei + nuclei_per_page - 1) // nuclei_per_page
+    nuc_idx = 0
+    while nuc_idx < n_nuclei:
+        slots_used = 0
+        prev_file_on_page = None
+        entries: list[tuple[NucleusCrop, bool]] = []
+
+        while nuc_idx < n_nuclei:
+            nuc = nucleus_crops_sorted[nuc_idx]
+            is_new_file = (nuc.source_filename != prev_file_on_page)
+            slots_needed = 1 + (1 if is_new_file else 0)
+
+            # Normal case: header row + nucleus row both fit.
+            if slots_used + slots_needed <= nuclei_per_page:
+                entries.append((nuc, is_new_file))
+                slots_used += slots_needed
+                prev_file_on_page = nuc.source_filename
+                nuc_idx += 1
+                continue
+
+            # Edge case: very small layouts (e.g., 1x1) cannot fit both header and nucleus.
+            # Keep the nucleus and suppress the dedicated header row so content is never dropped.
+            if slots_used == 0 and is_new_file and slots_used + 1 <= nuclei_per_page:
+                entries.append((nuc, False))
+                slots_used += 1
+                prev_file_on_page = nuc.source_filename
+                nuc_idx += 1
+            break
+
+        if len(entries) == 0:
+            raise RuntimeError("Pagination failed to place any nuclei on page; check layout settings.")
+        page_entries.append(entries)
+
+    n_pages = len(page_entries)
     
     print(f"  Generating {n_pages} page(s) for {n_nuclei} nuclei from {len(sorted_files)} files...")
     
-    # Track which file we're in for headers
-    current_file_idx = 0
-    nucleus_global_idx = 0
-    
     # Create PDF
     with PdfPages(output_path) as pdf:
-        for page_idx in range(n_pages):
-            start_idx = page_idx * nuclei_per_page
-            end_idx = min(start_idx + nuclei_per_page, n_nuclei)
-            page_nuclei = nucleus_crops_sorted[start_idx:end_idx]
+        for page_idx, page_nuclei in enumerate(page_entries):
             
             # Figure size calculation
             img_width_in = img_w / config.dpi
@@ -700,12 +785,11 @@ def generate_multipage_pdf(
             slot_idx = 0  # Tracks position including headers
             prev_file = None
             
-            for nuc_crop in page_nuclei:
+            for nuc_crop, should_draw_header in page_nuclei:
                 current_file = nuc_crop.source_filename
-                is_new_file = (current_file != prev_file)
                 
                 # If new file, draw header row first
-                if is_new_file:
+                if should_draw_header:
                     col_group = slot_idx // rows_per_col
                     row_in_group = slot_idx % rows_per_col
                     
@@ -734,18 +818,24 @@ def generate_multipage_pdf(
                     
                     slot_idx += 1
                     prev_file = current_file
+                elif prev_file is None:
+                    prev_file = current_file
                 
                 # Now draw the nucleus
                 col_group = slot_idx // rows_per_col
                 row_in_group = slot_idx % rows_per_col
                 
-                # Skip if we've run out of space on this page
+                # Defensive guard: pagination should prevent overflow.
                 if col_group >= nucleus_cols:
-                    continue
+                    break
                 
                 # Get image data and render
                 image_data = image_data_dict[nuc_crop.source_filename]
                 crop_data = extract_crop_data(image_data, nuc_crop.crop_meta)
+                valid_crop_mask = compute_valid_crop_mask(
+                    nuc_crop.crop_meta,
+                    (image_data.shape[1], image_data.shape[2]),
+                )
                 
                 # Get nucleus contour for outline
                 contour = None
@@ -787,6 +877,12 @@ def generate_multipage_pdf(
                         vmax=config.coloc_vmax,
                     )
                     all_images.append(coloc_rgb)
+
+                # Make padded regions visually explicit in exported PDF panels.
+                all_images = [
+                    apply_padding_color(img, valid_crop_mask, pad_color=(255, 255, 255))
+                    for img in all_images
+                ]
                 
                 pixel_size_um = nuc_crop.crop_meta.pixel_size_um[1]
                 
