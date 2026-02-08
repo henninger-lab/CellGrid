@@ -92,7 +92,7 @@ with col_left:
                         })
                     
                     import pandas as pd
-                    st.dataframe(pd.DataFrame(channel_data), hide_index=True, use_container_width=True)
+                    st.dataframe(pd.DataFrame(channel_data), hide_index=True, width='stretch')
                 except Exception as e:
                     st.warning(f"Could not read channel metadata: {e}")
         else:
@@ -353,7 +353,7 @@ if not output_dir:
     st.warning("⚠️ Please enter an output directory path")
 
 # Run button
-if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run, use_container_width=True):
+if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run, width="stretch"):
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)

@@ -13,6 +13,7 @@ Orchestrates the full pipeline:
 import os
 import json
 import glob
+import uuid
 import numpy as np
 import tifffile
 from pathlib import Path
@@ -167,6 +168,30 @@ def get_cache_paths(config: ReportConfig) -> tuple[str, str]:
     return cache_dir, seg_dir
 
 
+def _is_valid_max_projection(arr: np.ndarray) -> bool:
+    """Validate cached max projection shape before using it."""
+    return arr.ndim == 3 and arr.shape[0] > 0 and arr.shape[1] > 0 and arr.shape[2] > 0
+
+
+def _write_tiff_atomic(path: str, data: np.ndarray, zstd_level: int = 6):
+    """Write TIFF atomically to avoid partial cache files."""
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+    try:
+        tifffile.imwrite(
+            tmp_path,
+            data,
+            compression='zstd',
+            compressionargs={'level': zstd_level},
+        )
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def load_or_compute_max_projection(
     czi_path: str,
     cache_dir: str,
@@ -187,10 +212,19 @@ def load_or_compute_max_projection(
     # Check cache BEFORE loading CZI to save memory
     if use_cache and os.path.exists(cache_file):
         print(f"  Loading cached max projection: {cache_file}")
-        max_proj = tifffile.imread(cache_file)
-        # Still need CZI for metadata, but don't load image data
-        czi = CziImage(czi_path)
-        return max_proj, czi
+        try:
+            max_proj = tifffile.imread(cache_file)
+            if not _is_valid_max_projection(max_proj):
+                raise ValueError(f"invalid cached projection shape: {max_proj.shape}")
+            # Still need CZI for metadata, but don't load image data
+            czi = CziImage(czi_path)
+            return max_proj, czi
+        except Exception as e:
+            print(f"  WARNING: Corrupt max-projection cache, rebuilding: {e}")
+            try:
+                os.remove(cache_file)
+            except OSError:
+                pass
     
     # No cache - need to compute max projection
     print(f"  Loading CZI and computing max projection...")
@@ -210,10 +244,12 @@ def load_or_compute_max_projection(
         print(f"\n  ERROR: Out of memory! Pre-cache the max projection first:")
         print(f"    python cache_max_projections.py {Path(czi_path).parent} --cache_dir {cache_dir}")
         raise
+    if not _is_valid_max_projection(max_proj):
+        raise ValueError(f"Computed invalid max projection shape: {max_proj.shape}")
     
     if use_cache:
         os.makedirs(cache_dir, exist_ok=True)
-        tifffile.imwrite(cache_file, max_proj, compression='zstd', compressionargs={'level': 6})
+        _write_tiff_atomic(cache_file, max_proj, zstd_level=6)
         print(f"  Cached to: {cache_file}")
     
     return max_proj, czi

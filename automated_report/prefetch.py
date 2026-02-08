@@ -25,6 +25,7 @@ import os
 import gc
 import threading
 import queue
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple, Any
 from dataclasses import dataclass
@@ -110,6 +111,30 @@ class ImagePrefetcher:
     def _log(self, msg: str):
         if self.verbose:
             print(f"  [Prefetch] {msg}")
+
+    @staticmethod
+    def _is_valid_max_projection(arr: np.ndarray) -> bool:
+        """Validate cached max projection shape before using it."""
+        return arr.ndim == 3 and arr.shape[0] > 0 and arr.shape[1] > 0 and arr.shape[2] > 0
+
+    @staticmethod
+    def _write_tiff_atomic(path: str, data: np.ndarray):
+        """Write TIFF atomically to avoid partial cache files."""
+        tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+        try:
+            tifffile.imwrite(
+                tmp_path,
+                data,
+                compression='zstd',
+                compressionargs={'level': 3},
+            )
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
     
     def _load_image(self, czi_path: str) -> PrefetchedImage:
         """
@@ -127,29 +152,38 @@ class ImagePrefetcher:
         
         # Check cache first
         if self.use_cache and os.path.exists(cache_file):
-            max_proj = tifffile.imread(cache_file)
-            czi = CziImage(czi_path)  # Still need metadata
-            
-            load_time = time.time() - start_time
-            self._log(f"Loaded cached: {filename} ({load_time:.1f}s)")
-            
-            return PrefetchedImage(
-                max_proj=max_proj,
-                czi_obj=czi,
-                load_time=load_time,
-                from_cache=True,
-            )
+            try:
+                max_proj = tifffile.imread(cache_file)
+                if not self._is_valid_max_projection(max_proj):
+                    raise ValueError(f"invalid cached projection shape: {max_proj.shape}")
+
+                czi = CziImage(czi_path)  # Still need metadata
+
+                load_time = time.time() - start_time
+                self._log(f"Loaded cached: {filename} ({load_time:.1f}s)")
+
+                return PrefetchedImage(
+                    max_proj=max_proj,
+                    czi_obj=czi,
+                    load_time=load_time,
+                    from_cache=True,
+                )
+            except Exception as e:
+                self._log(f"Corrupt cache for {filename}, rebuilding ({e})")
+                try:
+                    os.remove(cache_file)
+                except OSError:
+                    pass
         
         # Load full CZI and compute max projection
         czi = CziImage(czi_path)
         max_proj = czi.zmax()
+        if not self._is_valid_max_projection(max_proj):
+            raise ValueError(f"computed invalid max projection shape: {max_proj.shape}")
         
         # Cache the result
         if self.use_cache:
-            tifffile.imwrite(
-                cache_file, max_proj,
-                compression='zstd', compressionargs={'level': 3}
-            )
+            self._write_tiff_atomic(cache_file, max_proj)
         
         # Clear raw data to save memory
         if hasattr(czi, '_image_data'):
