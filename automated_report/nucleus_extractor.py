@@ -28,6 +28,7 @@ class NucleusCrop:
     area_um2: float
     area_pixels: int
     unique_id: str
+    mean_intensities: list[float] = field(default_factory=list)
     
     def __post_init__(self):
         self.crop_meta.crop_id = self.unique_id
@@ -193,6 +194,9 @@ def extract_nuclei_from_mask(
             notes=f"Auto-extracted nucleus {nuc_id}",
             crop_id=unique_id,
         )
+
+        crop_data = extract_crop_data(image_data, crop_meta)
+        mean_intensities = [float(np.mean(crop_data[ch])) for ch in range(crop_data.shape[0])]
         
         nucleus_crop = NucleusCrop(
             crop_meta=crop_meta,
@@ -203,11 +207,33 @@ def extract_nuclei_from_mask(
             area_um2=area_um2,
             area_pixels=area_pixels,
             unique_id=unique_id,
+            mean_intensities=mean_intensities,
         )
         
         nucleus_crops.append(nucleus_crop)
     
     return nucleus_crops
+
+
+def get_crop_bounds(
+    image_shape: tuple[int, ...],
+    crop_meta: CropMetadata,
+) -> tuple[int, int, int, int]:
+    """Return clipped YX crop bounds for a CropMetadata region."""
+    center_y, center_x = crop_meta.center_pixel
+    box_h, box_w = crop_meta.box_size_pixels
+
+    y_start = center_y - box_h // 2
+    y_end = y_start + box_h
+    x_start = center_x - box_w // 2
+    x_end = x_start + box_w
+
+    y_start = max(0, y_start)
+    y_end = min(image_shape[-2], y_end)
+    x_start = max(0, x_start)
+    x_end = min(image_shape[-1], x_end)
+
+    return y_start, y_end, x_start, x_end
 
 
 def extract_crop_data(
@@ -224,19 +250,5 @@ def extract_crop_data(
     Returns:
         Cropped array in CYX format
     """
-    center_y, center_x = crop_meta.center_pixel
-    box_h, box_w = crop_meta.box_size_pixels
-    
-    # Calculate bounds
-    y_start = center_y - box_h // 2
-    y_end = y_start + box_h
-    x_start = center_x - box_w // 2
-    x_end = x_start + box_w
-    
-    # Clip to image bounds (should already be valid from extraction)
-    y_start = max(0, y_start)
-    y_end = min(image_data.shape[1], y_end)
-    x_start = max(0, x_start)
-    x_end = min(image_data.shape[2], x_end)
-    
+    y_start, y_end, x_start, x_end = get_crop_bounds(image_data.shape, crop_meta)
     return image_data[:, y_start:y_end, x_start:x_end]

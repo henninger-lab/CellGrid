@@ -16,7 +16,32 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .report_generator import ReportConfig, generate_qc_report_with_progress
+from .report_generator import (
+    ReportConfig,
+    generate_qc_report_with_progress,
+    VALID_COLOC_COLORMAPS,
+)
+
+
+def validate_contrast_percentiles(
+    contrast_percentiles: list[tuple[float, float]],
+    *,
+    error_fn,
+    warning_fn,
+):
+    """Validate percentile pairs and emit warnings for narrow ranges."""
+    for ch, (low, high) in enumerate(contrast_percentiles):
+        if low >= high:
+            error_fn(
+                f"Invalid contrast percentile pair for channel {ch}: "
+                f"low={low} must be less than high={high}."
+            )
+        if (high - low) < 10.0:
+            warning_fn(
+                f"Warning: channel {ch} contrast percentiles are only "
+                f"{high - low:.1f} percentage points apart ({low}, {high}). "
+                "This may produce very aggressive contrast stretching."
+            )
 
 
 def main():
@@ -248,6 +273,13 @@ Examples:
         help='Max brightness for colocalization colormap (default: 0.3). '
              'Lower values = brighter signal.'
     )
+    parser.add_argument(
+        '--coloc_colormap',
+        type=str,
+        default='oslo',
+        choices=VALID_COLOC_COLORMAPS,
+        help='Colormap for colocalization panels.'
+    )
     
     args = parser.parse_args()
     
@@ -263,6 +295,12 @@ Examples:
                 print(f"Warning: Invalid contrast percentile pair '{pair_str}', expected format: low,high")
                 print("Using default 0.5,99.5")
                 contrast_percentiles.append((0.5, 99.5))
+
+        validate_contrast_percentiles(
+            contrast_percentiles,
+            error_fn=parser.error,
+            warning_fn=lambda msg: print(msg, file=sys.stderr),
+        )
     
     # Create configuration
     config = ReportConfig(
@@ -293,6 +331,7 @@ Examples:
         enable_coloc=args.coloc_channels is not None,
         coloc_channels=tuple(args.coloc_channels) if args.coloc_channels else None,
         coloc_vmax=args.coloc_vmax,
+        coloc_colormap=args.coloc_colormap,
     )
     
     # Run report generation

@@ -41,6 +41,7 @@ from .nucleus_extractor import (
     NucleusCrop,
     extract_nuclei_from_mask,
     extract_crop_data,
+    get_crop_bounds,
 )
 from .contrast_calculator import (
     compute_global_contrast,
@@ -53,6 +54,8 @@ from .contrast_calculator import (
 from .coloc_heatmap import (
     compute_coloc_max_projection,
     render_coloc_heatmap,
+    render_coloc_scale_bar,
+    VALID_COLOC_COLORMAPS,
 )
 
 from .color_schemes import scheme_custom, ColorScheme
@@ -145,6 +148,7 @@ class ReportConfig:
     enable_coloc: bool = False  # Enable colocalization heatmap
     coloc_channels: Optional[tuple[int, int]] = None  # Channel pair for colocalization
     coloc_vmax: Optional[float] = None  # Max value for colormap scaling (None = auto)
+    coloc_colormap: str = 'oslo'
     
     # Caching
     use_cache: bool = True
@@ -228,8 +232,8 @@ def compute_colocalization_for_file(
     """
     Compute colocalization heatmap for a CZI file.
     
-    Must be called with full 4D data (before max projection caching loses Z info).
-    Caches the result for subsequent runs.
+    Reads only the two requested 3D channels and caches the result for
+    subsequent runs.
     
     Args:
         czi_path: Path to CZI file
@@ -249,16 +253,17 @@ def compute_colocalization_for_file(
         print(f"  Loading cached colocalization: {cache_file}")
         return tifffile.imread(cache_file)
     
-    # Need to load full 4D data and compute colocalization
+    # Need the two requested 3D channels and compute colocalization
     print(f"  Computing colocalization for channels {ch1} and {ch2}...")
     
     czi = CziImage(czi_path)
     
-    # Get full 4D image data (CZYX)
-    full_data = czi.image_data  # This loads the full 4D array
-    
-    # Compute colocalization (requires 4D CZYX data)
-    coloc_2d = compute_coloc_max_projection(full_data, coloc_channels)
+    # Read only the channels needed for colocalization instead of the full volume.
+    coloc_input = np.stack(
+        [czi.read_channel(ch1), czi.read_channel(ch2)],
+        axis=0,
+    )
+    coloc_2d = compute_coloc_max_projection(coloc_input, (0, 1))
     
     # Cache the result
     if use_cache:
@@ -271,9 +276,6 @@ def compute_colocalization_for_file(
             compressionargs={'level': 6}
         )
         print(f"  Cached colocalization to: {cache_file}")
-    
-    # Clear memory
-    czi._image_data = None
     
     return coloc_2d
 
@@ -449,20 +451,7 @@ def extract_nucleus_contour(
     """
     from skimage import measure
     
-    # Get crop bounds
-    center_y, center_x = crop_meta.center_pixel
-    box_h, box_w = crop_meta.box_size_pixels
-    
-    y_start = center_y - box_h // 2
-    x_start = center_x - box_w // 2
-    y_end = y_start + box_h
-    x_end = x_start + box_w
-    
-    # Clip to image bounds
-    y_start = max(0, y_start)
-    x_start = max(0, x_start)
-    y_end = min(mask.shape[0], y_end)
-    x_end = min(mask.shape[1], x_end)
+    y_start, y_end, x_start, x_end = get_crop_bounds(mask.shape, crop_meta)
     
     # Extract mask crop
     mask_crop = mask[y_start:y_end, x_start:x_end]
@@ -528,7 +517,14 @@ def smooth_contour_bspline(contour: np.ndarray, num_points: int = 200, smoothing
         return contour
 
 
-def draw_nucleus_outline(ax, contour: np.ndarray, color='white', linewidth=1.0, linestyle='dashed'):
+def draw_nucleus_outline(
+    ax,
+    contour: np.ndarray,
+    color='white',
+    linewidth=1.0,
+    linestyle='dashed',
+    smooth=True,
+):
     """
     Draw a smooth dashed nucleus outline using B-spline interpolation.
     
@@ -542,14 +538,13 @@ def draw_nucleus_outline(ax, contour: np.ndarray, color='white', linewidth=1.0, 
     if contour is None or len(contour) < 5:
         return
     
-    # Smooth the contour using B-spline with high smoothing
-    smooth = smooth_contour_bspline(contour, num_points=30, smoothing=200.0)
-    
-    if smooth is None:
-        smooth = contour  # Fallback to original
+    if smooth:
+        smoothed_contour = smooth_contour_bspline(contour, num_points=30, smoothing=200.0)
+        if smoothed_contour is not None:
+            contour = smoothed_contour
     
     # Close the contour
-    contour_closed = np.vstack([smooth, smooth[0]])
+    contour_closed = np.vstack([contour, contour[0]])
     
     # Define dash pattern: (dash_length, gap_length) in points
     if linestyle == 'dashed':
@@ -571,6 +566,29 @@ def draw_nucleus_outline(ax, contour: np.ndarray, color='white', linewidth=1.0, 
         alpha=0.9,
         zorder=10,
     )
+
+
+def build_contour_cache(
+    nucleus_crops: list[NucleusCrop],
+    mask_dict: dict[str, np.ndarray],
+) -> dict[str, Optional[np.ndarray]]:
+    """Compute and smooth each nucleus contour once for PDF reuse."""
+    contour_cache: dict[str, Optional[np.ndarray]] = {}
+
+    for nuc_crop in nucleus_crops:
+        mask = mask_dict.get(nuc_crop.source_filename)
+        if mask is None:
+            contour_cache[nuc_crop.unique_id] = None
+            continue
+
+        contour = extract_nucleus_contour(mask, nuc_crop.nucleus_id, nuc_crop.crop_meta)
+        if contour is not None and len(contour) >= 10:
+            smoothed_contour = smooth_contour_bspline(contour, num_points=30, smoothing=200.0)
+            if smoothed_contour is not None:
+                contour = smoothed_contour
+        contour_cache[nuc_crop.unique_id] = contour
+
+    return contour_cache
 
 def generate_multipage_pdf(
     nucleus_crops: list[NucleusCrop],
@@ -630,6 +648,10 @@ def generate_multipage_pdf(
                 mask_dict[filename] = mask
     elif mask_dict is None:
         mask_dict = {}
+
+    contour_cache = {}
+    if config.show_outline and mask_dict:
+        contour_cache = build_contour_cache(nucleus_crops_sorted, mask_dict)
     
     # Layout configuration from config
     nucleus_cols = config.nucleus_cols
@@ -639,9 +661,10 @@ def generate_multipage_pdf(
     # Get channel info from first nucleus
     first_nuc = nucleus_crops_sorted[0]
     active_channels = first_nuc.crop_meta.get_active_channels()
-    # channels + merge + coloc (if enabled)
+    include_merged = len(active_channels) > 1
+    # channels + optional merge + coloc (if enabled)
     has_coloc = coloc_data_dict is not None and len(coloc_data_dict) > 0
-    images_per_nucleus = len(active_channels) + 1 + (1 if has_coloc else 0)
+    images_per_nucleus = len(active_channels) + (1 if include_merged else 0) + (1 if has_coloc else 0)
     
     # Get image dimensions
     first_image = image_data_dict[first_nuc.source_filename]
@@ -686,8 +709,16 @@ def generate_multipage_pdf(
             # Add space for labels and gaps between nucleus groups
             label_width_in = 0.4  # Space for nucleus ID labels
             col_gap_in = 0.15  # Gap between nucleus groups
+            coloc_scale_gap_in = 0.03 if has_coloc else 0.0
+            coloc_scale_width_in = (img_width_in * 0.14) if has_coloc else 0.0
             
-            fig_width = (img_width_in * images_per_nucleus + label_width_in) * nucleus_cols + col_gap_in * (nucleus_cols - 1)
+            group_content_width_in = (
+                img_width_in * images_per_nucleus
+                + label_width_in
+                + coloc_scale_gap_in
+                + coloc_scale_width_in
+            )
+            fig_width = group_content_width_in * nucleus_cols + col_gap_in * (nucleus_cols - 1)
             fig_height = img_height_in * rows_per_col + 0.5  # Extra for title
             
             fig = plt.figure(figsize=(fig_width, fig_height), dpi=config.dpi)
@@ -712,7 +743,7 @@ def generate_multipage_pdf(
                     # Only draw if we have room on this page
                     if col_group < nucleus_cols:
                         # Calculate header position
-                        group_width = (img_width_in * images_per_nucleus + label_width_in) / fig_width
+                        group_width = group_content_width_in / fig_width
                         group_start_x = col_group * (group_width + col_gap_in / fig_width)
                         row_height = img_height_in / fig_height
                         row_start_y = 1.0 - 0.04 - (row_in_group + 1) * row_height
@@ -748,13 +779,7 @@ def generate_multipage_pdf(
                 crop_data = extract_crop_data(image_data, nuc_crop.crop_meta)
                 
                 # Get nucleus contour for outline
-                contour = None
-                if nuc_crop.source_filename in mask_dict:
-                    contour = extract_nucleus_contour(
-                        mask_dict[nuc_crop.source_filename],
-                        nuc_crop.nucleus_id,
-                        nuc_crop.crop_meta,
-                    )
+                contour = contour_cache.get(nuc_crop.unique_id)
                 
                 # Create FigurePanel
                 panel = FigurePanel(
@@ -766,32 +791,33 @@ def generate_multipage_pdf(
                 
                 # Render images
                 individual = panel.render_individual_channels()
-                merged = panel.render_merged()
-                all_images = individual + [merged]
+                all_images = list(individual)
+                if include_merged:
+                    all_images.append(panel.render_merged())
                 
                 # Add colocalization panel if enabled
+                coloc_scale_info = None
                 if has_coloc and nuc_crop.source_filename in coloc_data_dict:
                     coloc_full = coloc_data_dict[nuc_crop.source_filename]
-                    # Extract crop from colocalization data using same coordinates
-                    center_y, center_x = nuc_crop.crop_meta.center_pixel
-                    box_h, box_w = nuc_crop.crop_meta.box_size_pixels
-                    y_start = max(0, center_y - box_h // 2)
-                    y_end = min(coloc_full.shape[0], center_y + box_h // 2)
-                    x_start = max(0, center_x - box_w // 2)
-                    x_end = min(coloc_full.shape[1], center_x + box_w // 2)
+                    y_start, y_end, x_start, x_end = get_crop_bounds(
+                        coloc_full.shape,
+                        nuc_crop.crop_meta,
+                    )
                     coloc_crop = coloc_full[y_start:y_end, x_start:x_end]
                     
                     # Render colocalization heatmap
-                    coloc_rgb = render_coloc_heatmap(
+                    coloc_rgb, coloc_scale_info = render_coloc_heatmap(
                         coloc_crop, 
                         vmax=config.coloc_vmax,
+                        colormap=config.coloc_colormap,
+                        return_scale=True,
                     )
                     all_images.append(coloc_rgb)
                 
                 pixel_size_um = nuc_crop.crop_meta.pixel_size_um[1]
                 
                 # Calculate axes positions
-                group_width = (img_width_in * images_per_nucleus + label_width_in) / fig_width
+                group_width = group_content_width_in / fig_width
                 group_start_x = col_group * (group_width + col_gap_in / fig_width)
                 
                 row_height = img_height_in / fig_height
@@ -825,13 +851,46 @@ def generate_multipage_pdf(
                     
                     # Draw nucleus outline on all images (if enabled)
                     if config.show_outline and contour is not None:
-                        draw_nucleus_outline(ax, contour, color='white', linewidth=0.8)
+                        draw_nucleus_outline(ax, contour, color='white', linewidth=0.8, smooth=False)
                     
                     # Add scale bar (only on first nucleus of first page, first image)
                     if is_first_page and slot_idx == 1 and img_idx == 0:
                         _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=True)
                     else:
                         _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=False)
+
+                    if coloc_scale_info is not None and img_idx == len(all_images) - 1:
+                        scale_x = ax_x + ax_w + (coloc_scale_gap_in / fig_width)
+                        scale_w = coloc_scale_width_in / fig_width
+                        scale_ax = fig.add_axes([scale_x, ax_y, scale_w, ax_h])
+                        scale_ax.imshow(
+                            render_coloc_scale_bar(
+                                height=max(64, img.shape[0]),
+                                width=max(8, int(img.shape[1] * 0.08)),
+                                colormap=config.coloc_colormap,
+                            )
+                        )
+                        scale_ax.axis('off')
+                        scale_ax.text(
+                            1.15,
+                            1.0,
+                            f"{coloc_scale_info['vmax']:.2f}",
+                            transform=scale_ax.transAxes,
+                            ha='left',
+                            va='top',
+                            fontsize=4,
+                            color='black',
+                        )
+                        scale_ax.text(
+                            1.15,
+                            0.0,
+                            f"{coloc_scale_info['vmin']:.2f}",
+                            transform=scale_ax.transAxes,
+                            ha='left',
+                            va='bottom',
+                            fontsize=4,
+                            color='black',
+                        )
                 
                 slot_idx += 1
             # Add title
@@ -937,7 +996,10 @@ def save_metadata_csv(
                 row[f'contrast_max_ch{ch}'] = contrast.max_val
             
             # Add mean intensities if image data available
-            if image_data is not None:
+            if nuc_crop.mean_intensities:
+                for ch, mean_intensity in enumerate(nuc_crop.mean_intensities):
+                    row[f'mean_intensity_ch{ch}'] = mean_intensity
+            elif image_data is not None:
                 crop_data = extract_crop_data(image_data, nuc_crop.crop_meta)
                 for ch in range(crop_data.shape[0]):
                     row[f'mean_intensity_ch{ch}'] = float(np.mean(crop_data[ch]))

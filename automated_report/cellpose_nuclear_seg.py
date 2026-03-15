@@ -12,23 +12,51 @@ from types import SimpleNamespace
 import numpy as np
 import matplotlib.pyplot as plt
 from cellpose import models, plot, io
+from scipy import ndimage
 import tifffile
 
-_cellpose_model = None
+VALID_STRATEGIES = ['baseline', 'torch_compile', 'torch_compile_max']
+_cellpose_models = {}
 
-def get_cellpose_model():
-    """Get or create the Cellpose model (singleton pattern)."""
-    global _cellpose_model
-    if _cellpose_model is None:
+
+def get_cellpose_model(strategy='baseline'):
+    """Get or create a cached Cellpose model for the requested strategy."""
+    if strategy not in VALID_STRATEGIES:
+        raise ValueError(f"Unknown strategy '{strategy}'. Valid strategies: {VALID_STRATEGIES}")
+
+    if strategy not in _cellpose_models:
         print("  Loading Cellpose model (one-time)...")
-        _cellpose_model = models.CellposeModel(pretrained_model='cpsam', gpu=True)
+        model = models.CellposeModel(pretrained_model='cpsam', gpu=True)
         io.logger_setup()
-    return _cellpose_model
+        _apply_strategy(model, strategy)
+        _cellpose_models[strategy] = model
+
+    return _cellpose_models[strategy]
 
 
-def segment_nuclei(img, sample_name, save_dir='./nucleus_seg/', diameter=200, 
-                min_area=5000, max_area=500000, flow_threshold=0.9, 
-                cellprob_threshold=-0.3, save_mask_tiff=False, verbose=True):
+def _apply_strategy(model, strategy):
+    """Apply an optional optimization strategy to the Cellpose network."""
+    if strategy == 'baseline':
+        return
+
+    import torch
+
+    if strategy == 'torch_compile':
+        print("  Compiling Cellpose model with torch.compile(mode='reduce-overhead')...")
+        model.net = torch.compile(model.net, mode='reduce-overhead')
+        return
+
+    if strategy == 'torch_compile_max':
+        print("  Compiling Cellpose model with torch.compile(mode='max-autotune', fullgraph=True)...")
+        model.net = torch.compile(model.net, mode='max-autotune', fullgraph=True)
+        return
+
+    raise ValueError(f"Unknown strategy '{strategy}'")
+
+def segment_nuclei(img, sample_name, save_dir='./nucleus_seg/', diameter=200,
+                min_area=5000, max_area=500000, flow_threshold=0.9,
+                cellprob_threshold=-0.3, save_mask_tiff=False, verbose=True,
+                save_plot=True, model=None, strategy='baseline'):
     """
     Segment nuclei in a single image input as a numpy array. Returns the nuclei
     mask and saves the segmentation overlay as a PNG and optionally the labeled 
@@ -51,15 +79,18 @@ def segment_nuclei(img, sample_name, save_dir='./nucleus_seg/', diameter=200,
         flow_threshold=flow_threshold,
         cellprob_threshold=cellprob_threshold,
         save_mask_tiff=save_mask_tiff,
-        verbose=verbose
-    ))
+        verbose=verbose,
+        save_plot=save_plot,
+    ), model=model, strategy=strategy)
     return masks
 
-def run_cellpose_2D(img, sample_name, params):
+
+def run_cellpose_2D(img, sample_name, params, model=None, strategy='baseline'):
     """
     Run Cellpose on a single image - updated for v4
     """
-    model = get_cellpose_model()
+    if model is None:
+        model = get_cellpose_model(strategy=strategy)
  
     
     
@@ -81,36 +112,93 @@ def run_cellpose_2D(img, sample_name, params):
         output_name_tiff = os.path.join(params.output_path, f'{sample_name}_seg.tif')
         tifffile.imwrite(output_name_tiff, final_mask, compression='zstd')
     
-    fig = plt.figure(figsize=(12, 3))
+    if params.save_plot:
+        save_segmentation_plot(
+            img,
+            final_mask,
+            os.path.join(params.output_path, sample_name + '_seg.png'),
+        )
 
-    # create a visualization of the segmentation and save as PNG
-    plot.show_segmentation(fig, img, final_mask, flow[0])
-    # Add nucleus ID labels at centroids
-    
-    ax = plt.gca()
-    nucleus_ids = np.unique(final_mask)
-    nucleus_ids = nucleus_ids[nucleus_ids != 0]  # Exclude background
-    
-    for nucleus_id in nucleus_ids:
-        # Calculate centroid of this nucleus
-        nucleus_coords = np.where(final_mask == nucleus_id)
-        centroid_y = np.mean(nucleus_coords[0])
-        centroid_x = np.mean(nucleus_coords[1])
-        
-        # Add text label at centroid
-        ax.text(centroid_x, centroid_y, str(nucleus_id), 
-                color='white', fontsize=8, ha='center', va='center',
-                fontweight='bold', 
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='black', 
-                         alpha=0.6, edgecolor='none'))
-        
-
-    plt.tight_layout(pad=1.5)
-    plt.savefig(os.path.join(params.output_path, sample_name + '_seg.png'), dpi=150)
-    plt.close()
     if params.verbose:
         print(f"Processed {sample_name}: found {np.max(temp_mask)} nuclei")
     return final_mask
+
+
+def save_segmentation_plot(img, mask, save_path):
+    """
+    Save a fast 2-panel Cellpose QC figure with centroid labels.
+
+    This preserves the key QC signals from the prior utilities workflow:
+    raw image context, colored mask overlay, and nucleus IDs.
+    """
+    img0 = img.copy()
+    if img0.ndim == 3 and img0.shape[0] < 4:
+        img0 = np.transpose(img0, (1, 2, 0))
+    if img0.ndim < 3 or img0.shape[-1] < 3:
+        img0 = plot.image_to_rgb(img0, channels=[0, 0])
+    elif img0.max() <= 50.0:
+        img0 = np.uint8(np.clip(img0, 0, 1) * 255)
+
+    n_labels = int(mask.max())
+    overlay = _fast_mask_overlay(img0, mask, n_labels)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+    ax1.imshow(img0)
+    ax1.set_title("original image")
+    ax1.axis('off')
+
+    ax2.imshow(overlay)
+    ax2.set_title("predicted masks")
+    ax2.axis('off')
+
+    if n_labels > 0:
+        centroids = ndimage.center_of_mass(mask > 0, mask, range(1, n_labels + 1))
+        for nucleus_id, (centroid_y, centroid_x) in enumerate(centroids, start=1):
+            ax2.text(
+                centroid_x,
+                centroid_y,
+                str(nucleus_id),
+                color='white',
+                fontsize=8,
+                ha='center',
+                va='center',
+                fontweight='bold',
+                bbox=dict(
+                    boxstyle='round,pad=0.3',
+                    facecolor='black',
+                    alpha=0.6,
+                    edgecolor='none',
+                ),
+            )
+
+    plt.tight_layout(pad=1.5)
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+
+
+def _fast_mask_overlay(img0, mask, n_labels):
+    """Vectorized HSV mask overlay compatible with Cellpose-style QC output."""
+    from matplotlib.colors import hsv_to_rgb
+
+    if img0.ndim > 2:
+        gray = img0.astype(np.float32).mean(axis=-1)
+    else:
+        gray = img0.astype(np.float32)
+
+    hsv = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.float32)
+    value = np.clip((gray / 255.0 if gray.max() > 1 else gray) * 1.5, 0, 1)
+    foreground = mask > 0
+    value[foreground] = np.maximum(value[foreground], 0.4)
+    hsv[:, :, 2] = value
+
+    hue_map = np.zeros(n_labels + 1, dtype=np.float32)
+    if n_labels > 0:
+        hue_map[1:] = np.linspace(0, 1, n_labels + 1)[np.random.permutation(n_labels)]
+
+    hsv[:, :, 0] = hue_map[mask]
+    hsv[:, :, 1] = foreground.astype(np.float32)
+
+    return (hsv_to_rgb(hsv) * 255).astype(np.uint8)
 
 
 def filter_nuclei_outside_size_thresholds(params, mask):

@@ -9,6 +9,19 @@ import numpy as np
 from typing import Tuple, Optional
 from numba import njit, prange
 
+VALID_COLOC_COLORMAPS = ['oslo']
+
+
+def get_coloc_colormap(colormap: str = 'oslo'):
+    """Return a matplotlib colormap for colocalization rendering."""
+    if colormap not in VALID_COLOC_COLORMAPS:
+        raise ValueError(
+            f"Unknown colocalization colormap '{colormap}'. Valid options: {VALID_COLOC_COLORMAPS}"
+        )
+
+    from palettable.scientific.sequential import Oslo_20
+    return Oslo_20.mpl_colormap
+
 
 def z_score_transform(image: np.ndarray) -> np.ndarray:
     """
@@ -118,9 +131,11 @@ def compute_coloc_max_projection(
 def render_coloc_heatmap(
     coloc_data: np.ndarray,
     vmax: Optional[float] = None,
+    colormap: str = 'oslo',
+    return_scale: bool = False,
 ) -> np.ndarray:
     """
-    Render colocalization heatmap as RGB image using Oslo colormap.
+    Render colocalization heatmap as an RGB image.
     
     Zero and negative values are rendered as black. Only positive 
     colocalization values are shown on the colormap.
@@ -131,29 +146,32 @@ def render_coloc_heatmap(
         2D colocalization data (YX).
     vmax : float, optional
         Maximum value for colormap scaling. If None, uses data max.
+    colormap : str
+        Name of the colocalization colormap to use.
+    return_scale : bool
+        If True, also return scale metadata for legend rendering.
     
     Returns:
     --------
     rgb_image : np.ndarray
         RGB image (H, W, 3) as uint8.
     """
-    from palettable.scientific.sequential import Oslo_20
-    
-    cmap = Oslo_20.mpl_colormap
+    cmap = get_coloc_colormap(colormap)
     
     # Clip negative values to 0
     coloc_clipped = np.clip(coloc_data, 0, None)
     
     # Determine vmax
+    data_max = float(np.max(coloc_clipped)) if coloc_clipped.size else 0.0
     if vmax is None:
-        vmax = np.max(coloc_clipped)
+        vmax = data_max
     
     # Avoid division by zero
-    if vmax <= 0:
-        vmax = 30.0  # Default value if no positive signal
+    scale_vmax = float(vmax)
+    normalizer = scale_vmax if scale_vmax > 0 else 1.0
     
     # clip top end of the range to vmax
-    normalized = np.clip(coloc_clipped / vmax, 0, 1)
+    normalized = np.clip(coloc_clipped / normalizer, 0, 1)
     
     # Apply colormap
     rgba = cmap(normalized)
@@ -163,7 +181,29 @@ def render_coloc_heatmap(
     mask = coloc_data <= 0
     rgb[mask] = 0
     
+    if return_scale:
+        return rgb, {
+            'vmin': 0.0,
+            'vmax': scale_vmax,
+            'data_min': float(np.min(coloc_data)) if coloc_data.size else 0.0,
+            'data_max': data_max,
+            'colormap': colormap,
+        }
+
     return rgb
+
+
+def render_coloc_scale_bar(
+    height: int = 128,
+    width: int = 12,
+    colormap: str = 'oslo',
+) -> np.ndarray:
+    """Render a vertical RGB scale bar image for a colocalization colormap."""
+    cmap = get_coloc_colormap(colormap)
+    gradient = np.linspace(0, 1, height, dtype=np.float32)[:, np.newaxis]
+    gradient = np.repeat(gradient, width, axis=1)
+    rgba = cmap(gradient[::-1])
+    return (rgba[:, :, :3] * 255).astype(np.uint8)
 
 
 @njit(parallel=True, fastmath=True)

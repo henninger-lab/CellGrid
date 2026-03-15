@@ -48,7 +48,8 @@ class CziImage:
         # Get dimensions
         self.dims = self.czi.dims  # e.g., 'STCZYX' or 'BSCZYX'
         self.size = self.czi.size
-        dims_shape = self.czi.get_dims_shape()
+        self._dims_shape = self.czi.get_dims_shape()
+        self._dims_shape0 = self._dims_shape[0]
         
         path = Path(file_path)
         self.name = path.stem
@@ -61,14 +62,14 @@ class CziImage:
             self.channel_indexes[dim_name] = i
         
         # Extract CZYX dimensions
-        for dim_info in dims_shape:
+        for dim_info in self._dims_shape:
             for key, (start, size) in dim_info.items():
                 if key in ['C', 'Z', 'Y', 'X']:
                     setattr(self, key, size)
         
         print(f"Image dimensions: {self.dims}")
         print(f"Image size: {self.size}")
-        print(f"Axes: {dims_shape}")
+        print(f"Axes: {self._dims_shape}")
         
         # Store the actual axes as CZYX for compatibility
         self.axes = 'CZYX'
@@ -84,6 +85,8 @@ class CziImage:
         
         # Cache for full image data
         self._image_data = None
+        self._channel_data_cache = {}
+        self._zmax_cache = {}
     
     @property
     def image_data(self):
@@ -126,84 +129,108 @@ class CziImage:
         """Allow setting shape."""
         self._shape = value
     
-    def zmax(self, time_index=0):
+    def _normalize_channels(self, channels):
+        """Normalize channel selection into a validated list of channel indices."""
+        n_channels = self._dims_shape0.get('C', (0, 1))[1]
+
+        if channels is None:
+            return list(range(n_channels))
+
+        if isinstance(channels, int):
+            channels = [channels]
+        else:
+            channels = list(channels)
+
+        if not channels:
+            raise ValueError("At least one channel must be requested.")
+
+        invalid = [channel for channel in channels if channel < 0 or channel >= n_channels]
+        if invalid:
+            raise ValueError(
+                f"Requested invalid channel(s) {invalid}; available channel range is 0-{n_channels - 1}."
+            )
+
+        return channels
+
+    def _build_read_kwargs(self, time_index=0):
+        """Build kwargs for aicspylibczi reads while pinning singleton axes."""
+        read_kwargs = {}
+
+        for dim in ['B', 'V', 'S', 'M', 'H', 'I', 'R']:
+            if dim in self._dims_shape0:
+                read_kwargs[dim] = 0
+
+        if 'T' in self._dims_shape0:
+            t_size = self._dims_shape0['T'][1]
+            if t_size > 1:
+                print(f"  Timelapse detected ({t_size} frames), using frame {time_index}")
+            read_kwargs['T'] = min(time_index, t_size - 1)
+
+        return read_kwargs
+
+    def read_channel(self, channel, time_index=0):
+        """Read a single channel only and return it in ZYX format."""
+        cache_key = (channel, time_index)
+        if cache_key in self._channel_data_cache:
+            return self._channel_data_cache[cache_key]
+
+        n_z = self._dims_shape0.get('Z', (0, 1))[1]
+        read_kwargs = self._build_read_kwargs(time_index)
+        if 'C' in self._dims_shape0:
+            read_kwargs['C'] = channel
+        channel_image, _ = self.czi.read_image(**read_kwargs)
+        squeezed = np.squeeze(channel_image)
+
+        if squeezed.ndim == 2:
+            channel_data = squeezed[np.newaxis, :, :]
+        elif squeezed.ndim == 3 and n_z > 1:
+            channel_data = squeezed
+        else:
+            while squeezed.ndim > 3:
+                squeezed = np.squeeze(squeezed, axis=0)
+            if squeezed.ndim == 2:
+                channel_data = squeezed[np.newaxis, :, :]
+            elif squeezed.ndim == 3:
+                channel_data = squeezed
+            else:
+                raise ValueError(f"Unexpected channel shape for C={channel}: {squeezed.shape}")
+
+        self._channel_data_cache[cache_key] = channel_data
+        return channel_data
+
+    def zmax_channel(self, channel, time_index=0):
+        """Read a single channel and return its max projection in YX format."""
+        cache_key = (channel, time_index)
+        if cache_key in self._zmax_cache:
+            return self._zmax_cache[cache_key]
+
+        channel_data = self.read_channel(channel, time_index=time_index)
+        if channel_data.shape[0] > 1:
+            print(f"  Computing max projection over {channel_data.shape[0]} Z-slices")
+            zmax = np.max(channel_data, axis=0)
+        else:
+            zmax = channel_data[0]
+
+        self._zmax_cache[cache_key] = zmax
+        return zmax
+
+    def zmax(self, time_index=0, channels=None):
         """
         Returns max projection along Z axis.
         For timelapse data, uses the specified time index (default: first frame).
         Returns data in CYX format.
         """
-        full_image, _ = self.czi.read_image()
-        
-        # Build axis mapping for the full image
-        axis_map = {dim: i for i, dim in enumerate(self.dims)}
-        current_shape = list(full_image.shape)
-        
-        # Handle Time dimension - select single timepoint
-        if 'T' in axis_map:
-            t_axis = axis_map['T']
-            t_size = current_shape[t_axis]
-            if t_size > 1:
-                print(f"  Timelapse detected ({t_size} frames), using frame {time_index}")
-            full_image = np.take(full_image, min(time_index, t_size - 1), axis=t_axis)
-            # Remove T from axis_map and shift indices
-            del axis_map['T']
-            axis_map = {k: (v if v < t_axis else v - 1) for k, v in axis_map.items()}
-        
-        # Handle Scene/Block/Mosaic and other extra dimensions - take first
-        for dim in ['S', 'B', 'M', 'H', 'V', 'I', 'R']:
-            if dim in axis_map:
-                dim_axis = axis_map[dim]
-                dim_size = full_image.shape[dim_axis]
-                if dim_size > 1:
-                    print(f"  Multiple {dim} detected ({dim_size}), using first")
-                full_image = np.take(full_image, 0, axis=dim_axis)
-                del axis_map[dim]
-                axis_map = {k: (v if v < dim_axis else v - 1) for k, v in axis_map.items()}
-        
-        # Now we should have CZYX or subset
-        # Find Z axis and do max projection
-        if 'Z' in axis_map:
-            z_axis = axis_map['Z']
-            z_size = full_image.shape[z_axis]
-            if z_size > 1:
-                print(f"  Computing max projection over {z_size} Z-slices")
-                max_proj = np.max(full_image, axis=z_axis)
-            else:
-                max_proj = np.take(full_image, 0, axis=z_axis)
-            del axis_map['Z']
-            axis_map = {k: (v if v < z_axis else v - 1) for k, v in axis_map.items()}
-        else:
-            max_proj = full_image
-        
-        # Now we should have CYX (or YX if no C)
-        # Ensure C is first axis
-        if 'C' in axis_map:
-            c_axis = axis_map['C']
-            if c_axis != 0:
-                max_proj = np.moveaxis(max_proj, c_axis, 0)
-        else:
-            # No C dimension, add it
-            if max_proj.ndim == 2:
-                max_proj = max_proj[np.newaxis, :, :]
-        
-        # Final shape check - should be (C, Y, X)
-        if max_proj.ndim != 3:
-            print(f"  Warning: unexpected shape {max_proj.shape}, attempting to fix...")
-            # Try to squeeze any remaining singleton dimensions
-            max_proj = np.squeeze(max_proj)
-            if max_proj.ndim == 2:
-                max_proj = max_proj[np.newaxis, :, :]
-            elif max_proj.ndim > 3:
-                # Take first element of extra dimensions
-                while max_proj.ndim > 3:
-                    max_proj = max_proj[0]
-        
-        print(f"  Max projection shape: {max_proj.shape} (CYX)")
+        channels = self._normalize_channels(channels)
+        max_proj = np.stack(
+            [self.zmax_channel(channel, time_index=time_index) for channel in channels],
+            axis=0,
+        )
+        print(f"  Max projection shape: {max_proj.shape} (CYX) from channels {channels}")
         return max_proj
     
     def get_channel_slice(self, channel):
         """Get a specific channel from the image data."""
-        return self.image_data[channel, :, :, :]
+        return self.read_channel(channel)
     
     def parse_metadata(self, verbose=False):
         """
