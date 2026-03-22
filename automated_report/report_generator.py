@@ -13,6 +13,7 @@ Orchestrates the full pipeline:
 import os
 import json
 import glob
+import re
 import numpy as np
 import tifffile
 from pathlib import Path
@@ -169,6 +170,64 @@ def get_cache_paths(config: ReportConfig) -> tuple[str, str]:
     cache_dir = config.cache_dir or os.path.join(config.output_dir, "cache")
     seg_dir = os.path.join(config.output_dir, "segmentation")
     return cache_dir, seg_dir
+
+
+def _wrap_filename_header(
+    filename: str,
+    available_width_in: float,
+    fontsize: float,
+    max_lines: int = 3,
+) -> str:
+    """Wrap long filename headers so they stay inside a figure column."""
+    avg_char_width_in = max((fontsize * 0.6) / 72.0, 0.01)
+    max_chars = max(10, int(max(available_width_in, 0.25) / avg_char_width_in))
+    tokens = re.findall(r'[^_\-\s]+(?:[_\-\s]+|$)', filename) or [filename]
+
+    lines: list[str] = []
+    current = ""
+    token_idx = 0
+    overflowed = False
+
+    while token_idx < len(tokens):
+        token = tokens[token_idx]
+
+        if current and len(current) + len(token) <= max_chars:
+            current += token
+            token_idx += 1
+            continue
+
+        if not current and len(token) <= max_chars:
+            current = token
+            token_idx += 1
+            continue
+
+        if current:
+            lines.append(current.rstrip())
+            current = ""
+            if len(lines) >= max_lines:
+                overflowed = True
+                break
+            continue
+
+        # No natural break point available, so hard-wrap the token.
+        lines.append(token[:max_chars].rstrip())
+        tokens[token_idx] = token[max_chars:]
+        if len(lines) >= max_lines:
+            overflowed = bool(tokens[token_idx].strip()) or token_idx < len(tokens) - 1
+            break
+
+    if not overflowed and current:
+        lines.append(current.rstrip())
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        overflowed = True
+
+    if overflowed and lines:
+        truncated = lines[-1][:max(1, max_chars - 3)].rstrip()
+        lines[-1] = f"{truncated}..."
+
+    return "\n".join(lines)
 
 
 def load_or_compute_max_projection(
@@ -750,16 +809,30 @@ def generate_multipage_pdf(
                         
                         # Draw filename header
                         filename_stem = Path(current_file).stem
+                        header_fontsize = 6
+                        header_width_in = max(
+                            group_content_width_in - label_width_in - 0.04,
+                            img_width_in * 0.75,
+                        )
+                        header_label = filename_stem
+                        if len(active_channels) == 1:
+                            header_label = _wrap_filename_header(
+                                filename_stem,
+                                available_width_in=header_width_in,
+                                fontsize=header_fontsize,
+                                max_lines=3,
+                            )
                         fig.text(
                             group_start_x + label_width_in / fig_width,
                             row_start_y + row_height * 0.5,
-                            filename_stem,
-                            fontsize=6,
+                            header_label,
+                            fontsize=header_fontsize,
                             ha='left',
                             va='center',
                             fontweight='bold',
                             family='sans-serif',
                             color='black',
+                            linespacing=1.0,
                             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.9),
                         )
                     
