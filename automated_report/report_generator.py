@@ -12,7 +12,6 @@ Orchestrates the full pipeline:
 
 import os
 import json
-import glob
 import uuid
 import re
 import numpy as np
@@ -27,7 +26,7 @@ import sys
 from scipy.interpolate import splprep, splev
 
 # sys.path.insert(0, str(Path(__file__).parent.parent))
-from .parse_czi import CziImage
+from .parse_czi import CziImage, find_supported_image_files, microscopy_image_stem
 from .prefetch import ImagePrefetcher
 from .cellpose_nuclear_seg import segment_nuclei
 from .figure_generator import ( 
@@ -199,6 +198,8 @@ def _write_tiff_atomic(path: str, data: np.ndarray, zstd_level: int = 6):
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+
 def _wrap_filename_header(
     filename: str,
     available_width_in: float,
@@ -263,15 +264,14 @@ def load_or_compute_max_projection(
     use_cache: bool = True,
 ) -> tuple[np.ndarray, 'CziImage']:
     """
-    Load or compute max projection for a CZI file.
+    Load or compute max projection for a microscopy file.
     
     Checks for cached file FIRST to avoid loading large CZI files unnecessarily.
     
     Returns:
         (max_proj_cyx, czi_image)
     """
-    # Get the filename stem without loading the full CZI
-    czi_name = Path(czi_path).stem
+    czi_name = microscopy_image_stem(czi_path)
     cache_file = os.path.join(cache_dir, f"{czi_name}_max.tif")
     
     # Check cache BEFORE loading CZI to save memory
@@ -292,7 +292,7 @@ def load_or_compute_max_projection(
                 pass
     
     # No cache - need to compute max projection
-    print(f"  Loading CZI and computing max projection...")
+    print(f"  Loading microscopy file and computing max projection...")
     print(f"  (This may take a while for large files. Consider pre-caching with cache_max_projections.py)")
     
     czi = CziImage(czi_path)
@@ -341,7 +341,7 @@ def compute_colocalization_for_file(
     Returns:
         coloc_2d: 2D max-projected colocalization heatmap (YX)
     """
-    czi_name = Path(czi_path).stem
+    czi_name = microscopy_image_stem(czi_path)
     ch1, ch2 = coloc_channels
     cache_file = os.path.join(cache_dir, f"{czi_name}_coloc_ch{ch1}_ch{ch2}.tif")
     
@@ -711,6 +711,8 @@ def apply_padding_color(img: np.ndarray, valid_mask: np.ndarray, pad_color: tupl
     out = img.copy()
     out[~valid_mask] = np.array(pad_color, dtype=out.dtype)
     return out
+
+
 def build_contour_cache(
     nucleus_crops: list[NucleusCrop],
     mask_dict: dict[str, np.ndarray],
@@ -1297,16 +1299,14 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     save_run_parameters(config, config.output_dir, timestamp=timestamp)
     
     # Find and filter CZI files
-    czi_files = glob.glob(os.path.join(config.input_dir, "*.czi"))
-    czi_files.extend(glob.glob(os.path.join(config.input_dir, "*.CZI")))
-    czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
+    czi_files = find_supported_image_files(config.input_dir)
     
     # Filter by genotype BEFORE processing
     czi_files = [f for f in czi_files 
-                 if match_genotype(Path(f).stem, config.genotypes) is not None]
+                 if match_genotype(microscopy_image_stem(f), config.genotypes) is not None]
     
     if len(czi_files) == 0:
-        log(f"No CZI files match genotypes: {config.genotypes}")
+        log(f"No supported microscopy files match genotypes: {config.genotypes}")
         return
     
     log(f"Processing {len(czi_files)} files matching genotypes: {config.genotypes}")

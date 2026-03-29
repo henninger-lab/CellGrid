@@ -1,5 +1,5 @@
 # CellGrid
-A tool for easily creating figures to visualize and compare many cells from 3D input .czi images using a GUI interface.
+A tool for easily creating figures to visualize and compare many cells from 3D input microscopy images using a GUI interface.
 
 ## Quick Start
 1. Clone this github repo using Github Desktop (easiest) or enter the following command in the terminal. If using the command, start in whatever directory (folder) you want this to live in (e.g. Desktop).
@@ -23,7 +23,7 @@ streamlit run figure_app.py
 ```
 
 ## Input/Output
-- Input: folder containing z-stack .czi images
+- Input: folder containing z-stack `.czi`, `.ome.tif`, or `.ome.tiff` images
 - Outputs:  
     - genotype1_report.pdf
         - figure combining images for each genotype
@@ -39,10 +39,13 @@ streamlit run figure_app.py
 ## Ongoing usage
 After setting up for the first time, all you need to do for future use is navigate to the CellGrid folder, activate the conda environment (Quick Start step 3), and launch the app (Quick Start step 4)
 
+## Shared Loader
+The repo includes a reusable raw-image reader in [MICROSCOPY_LOADER.md](/home/grant/Desktop/henninger/CellGrid/MICROSCOPY_LOADER.md). It supports `.czi` and aligned `.ome.tif` / `.ome.tiff` files behind one API so other Henninger tools can reuse the same loader instead of maintaining separate format-specific readers.
+
 ## How it works
 CellGrid automates the process of converting raw microscopy data into organized figures.
 
-1. Reads Data: The tool scans your input directory for .czi files and groups them into experimental conditions (genotypes) based on text patterns you provide (e.g., "MED1", "BRD4").
+1. Reads Data: The tool scans your input directory for supported microscopy files (`.czi`, `.ome.tif`, `.ome.tiff`) and groups them into experimental conditions (genotypes) based on text patterns you provide (e.g., "MED1", "BRD4").
 
 2. Finds Cells (Segmentation): It uses Cellpose, a deep-learning algorithm, to automatically detect nuclei in your specified channel index.
 

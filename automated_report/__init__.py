@@ -2,7 +2,7 @@
 Automated QC Report Generator for Microscopy Images.
 
 This package provides automated nucleus segmentation and figure generation
-for fluorescence microscopy CZI files. It integrates with the existing
+for fluorescence microscopy CZI and OME-TIFF files. It integrates with the existing
 rep_image_workflow package for consistent figure styling.
 
 Main entry points:

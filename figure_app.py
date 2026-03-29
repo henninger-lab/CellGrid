@@ -9,7 +9,6 @@ Run with:
 import streamlit as st
 import os
 import sys
-import glob
 import zipfile
 from pathlib import Path
 from datetime import datetime
@@ -22,6 +21,7 @@ from automated_report.report_generator import (
     VALID_COLOC_COLORMAPS,
     generate_qc_report_with_progress,
 )
+from automated_report.parse_czi import CziImage, find_supported_image_files
 
 genotype_matches = None
 
@@ -54,7 +54,7 @@ st.set_page_config(
 # Title and description
 st.title("🔬 CellGrid Figure Generator")
 st.markdown("""
-Generate quality single cell comparison figures from CZI microscopy files with automated 
+Generate quality single cell comparison figures from CZI or OME-TIFF microscopy files with automated
 nucleus segmentation, contrast normalization, and PDF export.
 """)
 
@@ -68,21 +68,19 @@ with col_left:
     
     # Input directory path
     input_dir = st.text_input(
-        "Input directory (containing CZI files)",
+        "Input directory (containing CZI or OME-TIFF files)",
         value="",
         placeholder="/path/to/your/czi_files/",
-        help="Enter the full path to your folder containing CZI files"
+        help="Enter the full path to your folder containing supported microscopy files"
     )
     
-    # Scan for CZI files if directory exists
+    # Scan for supported microscopy files if directory exists
     czi_files = []
     if input_dir and os.path.isdir(input_dir):
-        czi_files = glob.glob(os.path.join(input_dir, "*.czi"))
-        czi_files.extend(glob.glob(os.path.join(input_dir, "*.CZI")))
-        czi_files = sorted(set(czi_files))  # Remove duplicates (Windows case-insensitivity)
+        czi_files = find_supported_image_files(input_dir)
         
         if czi_files:
-            st.success(f"✓ Found {len(czi_files)} CZI file(s)")
+            st.success(f"✓ Found {len(czi_files)} supported microscopy file(s)")
             with st.expander("View detected files"):
                 for f in czi_files:
                     # Show file size
@@ -90,7 +88,6 @@ with col_left:
                     st.text(f"  • {os.path.basename(f)} ({size_mb:.1f} MB)")
             with st.expander("Channel metadata (from first file)", expanded=True):
                 try:
-                    from automated_report.parse_czi import CziImage
                     import io
                     import sys
                     
@@ -119,7 +116,7 @@ with col_left:
                 except Exception as e:
                     st.warning(f"Could not read channel metadata: {e}")
         else:
-            st.warning("No CZI files found in this directory")
+            st.warning("No supported microscopy files found in this directory")
     elif input_dir:
         st.error("Directory not found")
     
@@ -414,7 +411,7 @@ ready_to_run = len(czi_files) > 0 and len(genotypes) > 0 and output_dir and not 
 if not input_dir:
     st.warning("⚠️ Please enter an input directory path")
 elif not czi_files:
-    st.warning("⚠️ No CZI files found in the input directory")
+    st.warning("⚠️ No supported microscopy files found in the input directory")
 if not genotypes or genotype_matches is False:
     st.warning("⚠️ Please enter at least one genotype that matches your files")
 if not output_dir:

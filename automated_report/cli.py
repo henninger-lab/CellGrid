@@ -46,7 +46,7 @@ def validate_contrast_percentiles(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate automated QC reports from CZI microscopy files",
+        description="Generate automated QC reports from CZI or OME-TIFF microscopy files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -96,7 +96,7 @@ Examples:
         '--input_dir', '-i',
         type=str,
         required=True,
-        help='Directory containing CZI files'
+        help='Directory containing supported microscopy files (.czi, .ome.tif, .ome.tiff)'
     )
     parser.add_argument(
         '--genotypes', '-g',

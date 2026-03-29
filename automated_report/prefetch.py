@@ -144,10 +144,10 @@ class ImagePrefetcher:
         and computes max projection.
         """
         # Import here to avoid issues with thread-local state
-        from .parse_czi import CziImage
+        from .parse_czi import CziImage, microscopy_image_stem
         
         start_time = time.time()
-        filename = Path(czi_path).stem
+        filename = microscopy_image_stem(czi_path)
         cache_file = os.path.join(self.cache_dir, f"{filename}_max.tif")
         
         # Check cache first
