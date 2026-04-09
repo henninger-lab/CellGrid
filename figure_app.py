@@ -17,9 +17,32 @@ from datetime import datetime
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from automated_report.report_generator import ReportConfig, generate_qc_report_with_progress
+from automated_report.report_generator import (
+    ReportConfig,
+    VALID_COLOC_COLORMAPS,
+    generate_qc_report_with_progress,
+)
 
 genotype_matches = None
+
+
+def validate_contrast_percentiles(contrast_percentiles):
+    """Return validation errors and warnings for percentile pairs."""
+    errors = []
+    warnings = []
+
+    for ch, (low, high) in enumerate(contrast_percentiles):
+        if low >= high:
+            errors.append(
+                f"Channel {ch}: low percentile ({low}) must be less than high percentile ({high})."
+            )
+        elif (high - low) < 10.0:
+            warnings.append(
+                f"Channel {ch}: low/high percentiles are only {high - low:.1f} points apart "
+                f"({low}, {high}). This may produce very aggressive contrast stretching."
+            )
+
+    return errors, warnings
 
 # Page config
 st.set_page_config(
@@ -236,21 +259,25 @@ with col_right:
             low = st.number_input(
                 f"Ch{ch} low %",
                 min_value=0.0,
-                max_value=80.0,
+                max_value=100.0,
                 value=0.5,
-                step=2.0,
+                step=0.1,
                 key=f"contrast_low_{ch}"
             )
         with col_c2:
             high = st.number_input(
                 f"Ch{ch} high %",
-                min_value=80.0,
+                min_value=0.0,
                 max_value=100.0,
                 value=99.8,
-                step=0.5,
+                step=0.1,
                 key=f"contrast_high_{ch}"
             )
         contrast_percentiles.append((low, high))
+
+contrast_errors, contrast_warnings = validate_contrast_percentiles(contrast_percentiles)
+for warning in contrast_warnings:
+    st.warning(f"⚠️ {warning}")
 
 # Channel colors section
 st.divider()
@@ -297,9 +324,10 @@ enable_coloc = st.checkbox(
 
 coloc_channels = None
 coloc_vmax = 20.0
+coloc_colormap = "oslo"
 
 if enable_coloc:
-    col_coloc1, col_coloc2 = st.columns(2)
+    col_coloc1, col_coloc2, col_coloc3 = st.columns(3)
     
     with col_coloc1:
         coloc_ch1 = st.selectbox(
@@ -318,6 +346,14 @@ if enable_coloc:
             format_func=lambda x: f"Channel {x}",
             key="coloc_ch2"
         )
+
+    with col_coloc3:
+        coloc_colormap = st.selectbox(
+            "Colormap",
+            options=VALID_COLOC_COLORMAPS,
+            index=VALID_COLOC_COLORMAPS.index("oslo"),
+            help="Colormap used for the colocalization heatmap and its scale bar.",
+        )
     
     if coloc_ch1 == coloc_ch2:
         st.warning("⚠️ Please select two different channels for colocalization")
@@ -335,13 +371,13 @@ if enable_coloc:
     )
     
     st.info("ℹ️ Colocalization is computed from the full 3D image before max projection. "
-            "Only positive colocalization is shown (Oslo colormap); background appears black.")
+            "Only positive colocalization is shown; the selected colormap controls the heatmap and scale bar.")
 
 # Generate button
 st.divider()
 
 # Validation
-ready_to_run = len(czi_files) > 0 and len(genotypes) > 0 and output_dir
+ready_to_run = len(czi_files) > 0 and len(genotypes) > 0 and output_dir and not contrast_errors
 
 if not input_dir:
     st.warning("⚠️ Please enter an input directory path")
@@ -351,6 +387,8 @@ if not genotypes or genotype_matches is False:
     st.warning("⚠️ Please enter at least one genotype that matches your files")
 if not output_dir:
     st.warning("⚠️ Please enter an output directory path")
+for error in contrast_errors:
+    st.error(f"⚠️ {error}")
 
 # Run button
 if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run, width="stretch"):
@@ -377,6 +415,7 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         enable_coloc=enable_coloc,
         coloc_channels=coloc_channels,
         coloc_vmax=coloc_vmax,
+        coloc_colormap=coloc_colormap,
     )
     
     # Run report generation with progress tracking

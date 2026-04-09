@@ -198,6 +198,10 @@ class FigurePanel:
                         self.channel_names.append(f"Ch{orig_c}")
                 else:
                     self.channel_names.append(f"Ch{orig_c}")
+
+    def should_render_merged(self) -> bool:
+        """Return True when a merged panel would add information."""
+        return len(self.active_channels) > 1
     
     def render_individual_channels(self) -> list[np.ndarray]:
         """
@@ -246,6 +250,7 @@ class FigurePanel:
         Returns:
             RGB array of the complete panel as uint8
         """
+        include_merged = include_merged and self.should_render_merged()
         individual = self.render_individual_channels()
         if include_merged:
             merged = self.render_merged()
@@ -350,6 +355,7 @@ class FigurePanel:
         import skimage.io
         
         # Get full-resolution composite
+        include_merged = include_merged and self.should_render_merged()
         composite = self.render_composite(include_merged=include_merged)
         
         if add_scale_bars:
@@ -434,6 +440,7 @@ class FigurePanel:
             saved_files.append(str(filename))
         
         # Save merged
+        include_merged = include_merged and self.should_render_merged()
         if include_merged:
             merged = self.render_merged()
             if add_scale_bars:
@@ -469,6 +476,7 @@ class FigurePanel:
         Returns:
             Matplotlib Figure object
         """
+        include_merged = include_merged and self.should_render_merged()
         individual = self.render_individual_channels()
         merged = self.render_merged() if include_merged else None
         
@@ -678,6 +686,8 @@ class FigureGrid:
         n_rows = len(self.rows)
         if n_rows == 0:
             raise ValueError("No rows added to grid")
+
+        include_merged = include_merged and self.rows[0].should_render_merged()
         
         # Determine number of columns from first row
         n_cols = self.rows[0].n_channels + (1 if include_merged else 0)
