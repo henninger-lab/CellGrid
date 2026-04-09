@@ -155,19 +155,19 @@ with col_left:
         
         # Preview genotype matching
         if czi_files:
-            with st.expander("Preview genotype matching"):
-                for g in genotypes:
-                    matches = [os.path.basename(f) for f in czi_files if g in os.path.basename(f)]
-                    if matches:
-                        st.markdown(f"**{g}**: {len(matches)} file(s)")
-                        for m in matches[:5]:  # Show first 5
-                            st.text(f"    • {m}")
-                        if len(matches) > 5:
-                            st.text(f"    ... and {len(matches) - 5} more")
-                        genotype_matches = True
-                    else:
-                        st.markdown(f"**{g}**: ⚠️ No matches")
-                        genotype_matches = False
+            st.markdown("**Preview genotype matching**")
+            for g in genotypes:
+                matches = [os.path.basename(f) for f in czi_files if g in os.path.basename(f)]
+                if matches:
+                    st.markdown(f"**{g}**: {len(matches)} file(s)")
+                    for m in matches[:5]:  # Show first 5
+                        st.text(f"    • {m}")
+                    if len(matches) > 5:
+                        st.text(f"    ... and {len(matches) - 5} more")
+                    genotype_matches = True
+                else:
+                    st.markdown(f"**{g}**: ⚠️ No matches")
+                    genotype_matches = False
 
 with col_right:
     st.header("⚙️ Figure Settings")
