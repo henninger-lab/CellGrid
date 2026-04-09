@@ -136,15 +136,19 @@ class ReportConfig:
     nucleus_cols: int = 3    # Nucleus columns per page
     dpi: int = 300
     show_outline: bool = True  # Draw nucleus outlines
+    show_channel_header_labels: bool = True  # Legacy field; page-1 channel labels are always shown
     
     # Contrast - list of (low, high) percentile tuples per channel
     # If None, uses (0.5, 99.5) for all channels
     # If fewer tuples than channels, last tuple is reused
+    fish_contrast_setting: bool = False
     contrast_percentiles: Optional[list[tuple[float, float]]] = None
     
     # Channels
     visible_channels: Optional[list[int]] = None  # None = all
     channel_colors: Optional[list[str]] = None  # None = auto from wavelengths
+    channel_labels: Optional[list[str]] = None  # Optional manual labels by channel index
+    merged_label: str = "Merged"
     
     # Colocalization settings
     enable_coloc: bool = False  # Enable colocalization heatmap
@@ -813,6 +817,7 @@ def generate_multipage_pdf(
     # Configure panels with tighter spacing
     panel_config = PanelConfig(
         show_channel_labels=False,
+        merged_label=config.merged_label,
         gap_pixels=2,
         gap_color=(255, 255, 255),
         border_pixels=1,
@@ -871,12 +876,14 @@ def generate_multipage_pdf(
             # Figure size calculation
             img_width_in = img_w / config.dpi
             img_height_in = img_h / config.dpi
+            is_first_page = (page_idx == 0)
             
             # Add space for labels and gaps between nucleus groups
             label_width_in = 0.4  # Space for nucleus ID labels
             col_gap_in = 0.15  # Gap between nucleus groups
             coloc_scale_gap_in = 0.03 if has_coloc else 0.0
             coloc_scale_width_in = (img_width_in * 0.14) if has_coloc else 0.0
+            page_top_margin = 0.08 if is_first_page else 0.04
             
             group_content_width_in = (
                 img_width_in * images_per_nucleus
@@ -891,7 +898,7 @@ def generate_multipage_pdf(
             fig.patch.set_facecolor('white')
             
             scale_bar_config = panel_config.scale_bar or ScaleBarConfig()
-            is_first_page = (page_idx == 0)
+            page_labels_drawn = False
             
             # Render nuclei with file headers taking their own row
             slot_idx = 0  # Tracks position including headers
@@ -911,7 +918,7 @@ def generate_multipage_pdf(
                         group_width = group_content_width_in / fig_width
                         group_start_x = col_group * (group_width + col_gap_in / fig_width)
                         row_height = img_height_in / fig_height
-                        row_start_y = 1.0 - 0.04 - (row_in_group + 1) * row_height
+                        row_start_y = 1.0 - page_top_margin - (row_in_group + 1) * row_height
                         
                         # Draw filename header
                         filename_stem = Path(current_file).stem
@@ -972,6 +979,7 @@ def generate_multipage_pdf(
                     crop_meta=nuc_crop.crop_meta,
                     color_scheme=color_scheme,
                     config=panel_config,
+                    channel_names=config.channel_labels,
                 )
                 
                 # Render images
@@ -1012,7 +1020,7 @@ def generate_multipage_pdf(
                 group_start_x = col_group * (group_width + col_gap_in / fig_width)
                 
                 row_height = img_height_in / fig_height
-                row_start_y = 1.0 - 0.04 - (row_in_group + 1) * row_height
+                row_start_y = 1.0 - page_top_margin - (row_in_group + 1) * row_height
                 
                 # Add nucleus ID label
                 label_x = group_start_x + 0.005
@@ -1029,6 +1037,9 @@ def generate_multipage_pdf(
                 # Plot each image
                 img_start_x = group_start_x + label_width_in / fig_width
                 single_img_width = img_width_in / fig_width
+                label_texts = panel.channel_names + ([panel_config.merged_label] if include_merged else [])
+                if has_coloc:
+                    label_texts.append("Colocalization")
                 
                 for img_idx, img in enumerate(all_images):
                     ax_x = img_start_x + img_idx * single_img_width
@@ -1049,6 +1060,29 @@ def generate_multipage_pdf(
                         _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=True)
                     else:
                         _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=False)
+
+                    if (
+                        is_first_page
+                        and not page_labels_drawn
+                        and col_group == 0
+                        and img_idx < len(label_texts)
+                    ):
+                        label_y = row_start_y + row_height + min(
+                            page_top_margin * 0.12,
+                            row_height * 0.08,
+                        )
+                        fig.text(
+                            ax_x + ax_w * 0.5,
+                            label_y,
+                            label_texts[img_idx],
+                            fontsize=11,
+                            ha='center',
+                            va='center',
+                            fontweight='bold',
+                            color='black',
+                        )
+                        if img_idx == len(label_texts) - 1:
+                            page_labels_drawn = True
 
                     if coloc_scale_info is not None and img_idx == len(all_images) - 1:
                         scale_x = ax_x + ax_w + (coloc_scale_gap_in / fig_width)

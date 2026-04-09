@@ -143,10 +143,25 @@ def extract_nuclei_from_mask(
     for props in regions:
         nuc_id = props.label
         
-        # >>> OPTIMIZATION: Border check using bounding box (no image scan needed)
+        # Exclude nuclei that either touch the segmentation border or would
+        # require a crop extending outside the image bounds.
         if exclude_border:
             min_row, min_col, max_row, max_col = props.bbox
             if min_row == 0 or min_col == 0 or max_row == h or max_col == w:
+                continue
+
+            centroid_y_px = int(props.centroid[0])
+            centroid_x_px = int(props.centroid[1])
+            crop_y_start = centroid_y_px - half_h
+            crop_y_end = crop_y_start + box_height_px
+            crop_x_start = centroid_x_px - half_w
+            crop_x_end = crop_x_start + box_width_px
+            if (
+                crop_y_start < 0
+                or crop_x_start < 0
+                or crop_y_end > h
+                or crop_x_end > w
+            ):
                 continue
         # <
         

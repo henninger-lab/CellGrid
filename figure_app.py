@@ -238,10 +238,16 @@ with col_right:
         value=True,
         help="Draw dashed outline around each nucleus"
     )
-    
+
     st.markdown("### Contrast Normalization")
     st.markdown("**Per-channel contrast percentiles**")
-    st.caption("Set low and high percentiles for each channel. Leave empty to use defaults (0.5, 99.5).")
+    st.caption("Set low and high percentiles for each channel. Leave empty to use defaults (0.5, 99.5). \nHigher percentiles for the max will preserve more of the dynamic range but may produce dimmer images if there are very bright pixels. Lower percentiles will produce brighter images but may saturate some pixels. Typically a max between 98 and 99.95 works well.")
+
+    fish_contrast_setting = st.checkbox(
+        "FISH contrast setting",
+        value=False,
+        help="Override all channels to use min percentile 90 and max percentile 100."
+    )
     
     # Dynamic channel contrast inputs
     n_contrast_channels = st.number_input(
@@ -274,6 +280,10 @@ with col_right:
                 key=f"contrast_high_{ch}"
             )
         contrast_percentiles.append((low, high))
+
+    if fish_contrast_setting:
+        contrast_percentiles = [(90.0, 100.0) for _ in range(n_contrast_channels)]
+        st.info("FISH contrast setting enabled: all channels will use min percentile 90 and max percentile 100.")
 
 contrast_errors, contrast_warnings = validate_contrast_percentiles(contrast_percentiles)
 for warning in contrast_warnings:
@@ -310,6 +320,28 @@ if visible_channels_enabled:
     )
 else:
     visible_channels = None
+
+# Manual channel labels
+st.divider()
+st.header("🏷️ Channel Labels")
+st.caption("These labels will appear at the top of the first set of figure panels. Use this to provide meaningful names for your channels (e.g. 'Hoechst', 'MED1').")
+
+channel_labels = []
+label_cols = st.columns(min(n_contrast_channels, 4))
+for ch in range(n_contrast_channels):
+    with label_cols[ch % len(label_cols)]:
+        label = st.text_input(
+            f"Label for Channel {ch}",
+            value=f"Ch{ch}",
+            key=f"label_{ch}",
+        )
+        channel_labels.append(label.strip() or f"Ch{ch}")
+
+merged_label = st.text_input(
+    "Merged panel label",
+    value="Merged",
+    help="Manual label for the merged image panel."
+).strip() or "Merged"
 
 # Colocalization section
 st.divider()
@@ -409,9 +441,12 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         rows_per_page=rows_per_page,
         nucleus_cols=nucleus_cols,
         show_outline=show_outline,
+        fish_contrast_setting=fish_contrast_setting,
         contrast_percentiles=contrast_percentiles if contrast_percentiles else None,
         channel_colors=channel_colors if channel_colors else None,
         visible_channels=visible_channels,
+        channel_labels=channel_labels,
+        merged_label=merged_label,
         enable_coloc=enable_coloc,
         coloc_channels=coloc_channels,
         coloc_vmax=coloc_vmax,
