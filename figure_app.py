@@ -185,7 +185,7 @@ with col_right:
         "Expected nucleus diameter (pixels)",
         min_value=10,
         max_value=1000,
-        value=300,
+        value=450,
         help="Approximate diameter of nuclei in pixels"
     )
     
