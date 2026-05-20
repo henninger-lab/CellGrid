@@ -23,6 +23,7 @@ from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import sys
+from scipy.ndimage import gaussian_filter
 from scipy.interpolate import splprep, splev
 
 # sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -123,6 +124,7 @@ class ReportConfig:
     cellpose_cellprob_threshold: float = 0.0
     min_area_pixels: int = 5000
     max_area_pixels: int = 500000
+    nuclear_segmentation_blur_sigma: float = 8.0
     exclude_border: bool = True
     
     # Visualization
@@ -385,7 +387,7 @@ def should_rerun_segmentation(
     """
     Check if segmentation should be re-run based on parameter changes.
     
-    Compares the current nuclear_channel setting against saved parameters.
+    Compares the current segmentation settings against saved parameters.
     """
     params_file = os.path.join(seg_dir, f"{sample_name}_params.json")
     mask_file = os.path.join(seg_dir, f"{sample_name}_seg.tif")
@@ -398,21 +400,54 @@ def should_rerun_segmentation(
     if not os.path.exists(params_file):
         return True
     
-    # Load saved parameters and compare nuclear_channel
+    # Load saved parameters and compare segmentation settings
     try:
         with open(params_file, 'r') as f:
             saved_params = json.load(f)
-        
-        if saved_params.get('nuclear_channel') != config.nuclear_channel:
-            print(f"  Nuclear channel changed ({saved_params.get('nuclear_channel')} -> {config.nuclear_channel}), re-segmenting")
-            return True
-        
-        # Could add more parameter comparisons here if desired
-        
+
+        current_params = get_segmentation_params(config)
+        for key, current_value in current_params.items():
+            if saved_params.get(key) != current_value:
+                print(
+                    f"  Segmentation parameter '{key}' changed "
+                    f"({saved_params.get(key)} -> {current_value}), re-segmenting"
+                )
+                return True
+
     except (json.JSONDecodeError, IOError):
         return True
     
     return False
+
+
+def get_segmentation_params(config: ReportConfig) -> dict:
+    """Return parameters that affect cached segmentation masks."""
+    return {
+        'nuclear_channel': config.nuclear_channel,
+        'cellpose_diameter': config.cellpose_diameter,
+        'cellpose_flow_threshold': config.cellpose_flow_threshold,
+        'cellpose_cellprob_threshold': config.cellpose_cellprob_threshold,
+        'min_area_pixels': config.min_area_pixels,
+        'max_area_pixels': config.max_area_pixels,
+        'nuclear_segmentation_blur_sigma': config.nuclear_segmentation_blur_sigma,
+    }
+
+
+def prepare_nuclear_segmentation_image(
+    max_proj: np.ndarray,
+    nuclear_channel: int,
+    blur_sigma: float,
+) -> np.ndarray:
+    """Create the 2D nuclear image used only for segmentation."""
+    nuclear_img = max_proj[nuclear_channel]
+    if blur_sigma <= 0:
+        return nuclear_img
+
+    return gaussian_filter(
+        nuclear_img.astype(np.float32, copy=False),
+        sigma=(blur_sigma, blur_sigma),
+        mode='nearest',
+    )
 
 
 def segment_image(
@@ -437,7 +472,16 @@ def segment_image(
     
     # Run Cellpose segmentation
     print(f"  Running Cellpose segmentation...")
-    nuclear_img = max_proj[config.nuclear_channel]
+    nuclear_img = prepare_nuclear_segmentation_image(
+        max_proj,
+        config.nuclear_channel,
+        config.nuclear_segmentation_blur_sigma,
+    )
+    if config.nuclear_segmentation_blur_sigma > 0:
+        print(
+            "  Applying 2D Gaussian blur to segmentation input "
+            f"(sigma={config.nuclear_segmentation_blur_sigma:g} px)"
+        )
     
     mask = segment_nuclei(
         nuclear_img,
@@ -1515,15 +1559,8 @@ def save_segmentation_params(
     """Save segmentation parameters for later comparison."""
     params_file = os.path.join(seg_dir, f"{sample_name}_params.json")
     
-    params = {
-        'nuclear_channel': config.nuclear_channel,
-        'cellpose_diameter': config.cellpose_diameter,
-        'cellpose_flow_threshold': config.cellpose_flow_threshold,
-        'cellpose_cellprob_threshold': config.cellpose_cellprob_threshold,
-        'min_area_pixels': config.min_area_pixels,
-        'max_area_pixels': config.max_area_pixels,
-        'timestamp': datetime.now().isoformat(),
-    }
+    params = get_segmentation_params(config)
+    params['timestamp'] = datetime.now().isoformat()
     
     with open(params_file, 'w') as f:
         json.dump(params, f, indent=2)

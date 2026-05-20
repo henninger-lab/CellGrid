@@ -151,6 +151,12 @@ Examples:
         help='Maximum nucleus area in pixels (default: 500000)'
     )
     parser.add_argument(
+        '--nuclear_segmentation_blur_sigma',
+        type=float,
+        default=8.0,
+        help='2D Gaussian blur sigma in pixels applied only to the nuclear segmentation input (default: 8.0)'
+    )
+    parser.add_argument(
         '--include_border',
         action='store_true',
         help='Include nuclei touching image border (default: exclude)'
@@ -313,6 +319,7 @@ Examples:
         cellpose_cellprob_threshold=args.cellprob_threshold,
         min_area_pixels=args.min_area,
         max_area_pixels=args.max_area,
+        nuclear_segmentation_blur_sigma=args.nuclear_segmentation_blur_sigma,
         exclude_border=not args.include_border,
         box_size_um=args.box_size_um,
         scale_bar_um=args.scale_bar_um,
