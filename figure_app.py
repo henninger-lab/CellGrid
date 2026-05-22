@@ -188,6 +188,15 @@ with col_right:
         value=450,
         help="Approximate diameter of nuclei in pixels"
     )
+
+    nuclear_segmentation_blur_sigma = st.number_input(
+        "Nuclear segmentation blur sigma (pixels)",
+        min_value=0.0,
+        max_value=50.0,
+        value=8.0,
+        step=0.5,
+        help="2D Gaussian blur applied only to the max-projected nuclear image before segmentation"
+    )
     
     exclude_border = st.checkbox(
         "Exclude border-touching nuclei",
@@ -432,6 +441,7 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         genotypes=genotypes,
         nuclear_channel=nuclear_channel,
         cellpose_diameter=cellpose_diameter,
+        nuclear_segmentation_blur_sigma=nuclear_segmentation_blur_sigma,
         exclude_border=exclude_border,
         box_size_um=box_size_um,
         scale_bar_um=scale_bar_um,
