@@ -28,7 +28,7 @@ from scipy.interpolate import splprep, splev
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from .parse_czi import CziImage, find_supported_image_files, microscopy_image_stem
 from .prefetch import ImagePrefetcher
-from .cellpose_nuclear_seg import segment_nuclei
+from .cellpose_nuclear_seg import segment_nuclei, save_qc_contact_sheet
 from .figure_generator import ( 
     ColorScheme, 
     get_scheme,
@@ -119,7 +119,7 @@ class ReportConfig:
     # Segmentation
     nuclear_channel: int = 0
     cellpose_diameter: int = 300
-    cellpose_flow_threshold: float = 0.4
+    cellpose_flow_threshold: float = 0.2
     cellpose_cellprob_threshold: float = 0.0
     min_area_pixels: int = 5000
     max_area_pixels: int = 500000
@@ -1318,6 +1318,7 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     coloc_data_dict: dict[str, np.ndarray] = {}  # Colocalization heatmaps per file
     czi_info_dict: dict[str, CziImage] = {}
     existing_ids: set[str] = set()
+    segmentation_qc_paths: list[str] = []
     
     cache_dir, seg_dir = get_cache_paths(config)
 
@@ -1363,6 +1364,9 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             mask = segment_image(max_proj, czi.name, config, seg_dir)
             timer.stop()
             n_nuclei = len(np.unique(mask)) - 1
+            qc_path = os.path.join(seg_dir, f"{czi.name}_seg.png")
+            if os.path.exists(qc_path):
+                segmentation_qc_paths.append(qc_path)
             log(f"  Segmented: {n_nuclei} nuclei")
             
             # Stage 3: Extract crops
@@ -1403,6 +1407,13 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             continue
 
     prefetcher.shutdown()
+    if segmentation_qc_paths:
+        contact_sheet_paths = save_qc_contact_sheet(
+            os.path.join(seg_dir, "segmentation_qc_contact_sheet.png"),
+            segmentation_qc_paths,
+        )
+        for contact_sheet_path in contact_sheet_paths:
+            log(f"  Segmentation QC contact sheet: {contact_sheet_path}")
     prefetcher.print_stats()
     timer.print_summary()
     # Report summary

@@ -8,6 +8,7 @@ dependencies:
   - matplotlib
   - scikit-image
   - scipy
+  - opencv
   - tifffile
   - aicspylibczi
   - cellpose

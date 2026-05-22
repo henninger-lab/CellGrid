@@ -129,8 +129,8 @@ Examples:
     parser.add_argument(
         '--flow_threshold',
         type=float,
-        default=0.4,
-        help='Cellpose flow threshold (default: 0.4, higher = more masks)'
+        default=0.2,
+        help='Cellpose flow threshold (default: 0.2, higher = more masks)'
     )
     parser.add_argument(
         '--cellprob_threshold',
