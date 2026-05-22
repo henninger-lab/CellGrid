@@ -268,7 +268,7 @@ def _compute_stats_and_heatmap(
                 # Note: Your original code used >= 0, keeping consistent
                 if z1 >= 0 and z2 >= 0:
                     numerator = z1 * z2
-                    denominator = abs(z1-z2) + 1
+                    denominator = abs(z1) + abs(z2) + 1
                     coloc_map[z, y, x] = numerator / denominator
                 else:
                     coloc_map[z, y, x] = 0.0
