@@ -3,7 +3,7 @@ Automated QC Report Generator.
 
 Orchestrates the full pipeline:
 1. Load/cache max projections
-2. Segment nuclei with Cellpose CPSAM
+2. Segment nuclei with Cellpose cpsam_v2
 3. Extract nucleus crops
 4. Group by genotype
 5. Compute global contrast
@@ -29,7 +29,7 @@ from scipy.interpolate import splprep, splev
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from .parse_czi import CziImage, find_supported_image_files, microscopy_image_stem
 from .prefetch import ImagePrefetcher
-from .cellpose_nuclear_seg import segment_nuclei, save_qc_contact_sheet
+from .cellpose_nuclear_seg import DEFAULT_MODEL_NAME, segment_nuclei, save_qc_contact_sheet
 from .figure_generator import ( 
     ColorScheme, 
     get_scheme,
@@ -124,7 +124,7 @@ class ReportConfig:
     cellpose_cellprob_threshold: float = 0.0
     min_area_pixels: int = 5000
     max_area_pixels: int = 500000
-    nuclear_segmentation_blur_sigma: float = 8.0
+    nuclear_segmentation_blur_sigma: float = 0.0
     exclude_border: bool = True
     
     # Visualization
@@ -423,6 +423,7 @@ def should_rerun_segmentation(
 def get_segmentation_params(config: ReportConfig) -> dict:
     """Return parameters that affect cached segmentation masks."""
     return {
+        'cellpose_model': DEFAULT_MODEL_NAME,
         'nuclear_channel': config.nuclear_channel,
         'cellpose_diameter': config.cellpose_diameter,
         'cellpose_flow_threshold': config.cellpose_flow_threshold,

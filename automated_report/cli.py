@@ -153,8 +153,8 @@ Examples:
     parser.add_argument(
         '--nuclear_segmentation_blur_sigma',
         type=float,
-        default=8.0,
-        help='2D Gaussian blur sigma in pixels applied only to the nuclear segmentation input (default: 8.0)'
+        default=0.0,
+        help='2D Gaussian blur sigma in pixels applied only to the nuclear segmentation input (default: 0.0)'
     )
     parser.add_argument(
         '--include_border',
