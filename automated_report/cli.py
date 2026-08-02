@@ -129,8 +129,8 @@ Examples:
     parser.add_argument(
         '--flow_threshold',
         type=float,
-        default=0.2,
-        help='Cellpose flow threshold (default: 0.2, higher = more masks)'
+        default=0.4,
+        help='Cellpose flow threshold (default: 0.4, higher = more masks)'
     )
     parser.add_argument(
         '--cellprob_threshold',
@@ -149,12 +149,6 @@ Examples:
         type=int,
         default=500000,
         help='Maximum nucleus area in pixels (default: 500000)'
-    )
-    parser.add_argument(
-        '--nuclear_segmentation_blur_sigma',
-        type=float,
-        default=0.0,
-        help='2D Gaussian blur sigma in pixels applied only to the nuclear segmentation input (default: 0.0)'
     )
     parser.add_argument(
         '--include_border',
@@ -319,7 +313,6 @@ Examples:
         cellpose_cellprob_threshold=args.cellprob_threshold,
         min_area_pixels=args.min_area,
         max_area_pixels=args.max_area,
-        nuclear_segmentation_blur_sigma=args.nuclear_segmentation_blur_sigma,
         exclude_border=not args.include_border,
         box_size_um=args.box_size_um,
         scale_bar_um=args.scale_bar_um,

@@ -23,13 +23,17 @@ from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import sys
-from scipy.ndimage import gaussian_filter
 from scipy.interpolate import splprep, splev
 
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from .parse_czi import CziImage, find_supported_image_files, microscopy_image_stem
 from .prefetch import ImagePrefetcher
-from .cellpose_nuclear_seg import DEFAULT_MODEL_NAME, segment_nuclei, save_qc_contact_sheet
+from .cellpose_nuclear_seg import (
+    DEFAULT_MODEL_NAME,
+    SEGMENTATION_PIPELINE_VERSION,
+    segment_nuclei,
+    save_qc_contact_sheet,
+)
 from .figure_generator import ( 
     ColorScheme, 
     get_scheme,
@@ -120,11 +124,10 @@ class ReportConfig:
     # Segmentation
     nuclear_channel: int = 0
     cellpose_diameter: int = 300
-    cellpose_flow_threshold: float = 0.2
+    cellpose_flow_threshold: float = 0.4
     cellpose_cellprob_threshold: float = 0.0
     min_area_pixels: int = 5000
     max_area_pixels: int = 500000
-    nuclear_segmentation_blur_sigma: float = 0.0
     exclude_border: bool = True
     
     # Visualization
@@ -423,6 +426,7 @@ def should_rerun_segmentation(
 def get_segmentation_params(config: ReportConfig) -> dict:
     """Return parameters that affect cached segmentation masks."""
     return {
+        'segmentation_pipeline': SEGMENTATION_PIPELINE_VERSION,
         'cellpose_model': DEFAULT_MODEL_NAME,
         'nuclear_channel': config.nuclear_channel,
         'cellpose_diameter': config.cellpose_diameter,
@@ -430,25 +434,7 @@ def get_segmentation_params(config: ReportConfig) -> dict:
         'cellpose_cellprob_threshold': config.cellpose_cellprob_threshold,
         'min_area_pixels': config.min_area_pixels,
         'max_area_pixels': config.max_area_pixels,
-        'nuclear_segmentation_blur_sigma': config.nuclear_segmentation_blur_sigma,
     }
-
-
-def prepare_nuclear_segmentation_image(
-    max_proj: np.ndarray,
-    nuclear_channel: int,
-    blur_sigma: float,
-) -> np.ndarray:
-    """Create the 2D nuclear image used only for segmentation."""
-    nuclear_img = max_proj[nuclear_channel]
-    if blur_sigma <= 0:
-        return nuclear_img
-
-    return gaussian_filter(
-        nuclear_img.astype(np.float32, copy=False),
-        sigma=(blur_sigma, blur_sigma),
-        mode='nearest',
-    )
 
 
 def segment_image(
@@ -473,16 +459,7 @@ def segment_image(
     
     # Run Cellpose segmentation
     print(f"  Running Cellpose segmentation...")
-    nuclear_img = prepare_nuclear_segmentation_image(
-        max_proj,
-        config.nuclear_channel,
-        config.nuclear_segmentation_blur_sigma,
-    )
-    if config.nuclear_segmentation_blur_sigma > 0:
-        print(
-            "  Applying 2D Gaussian blur to segmentation input "
-            f"(sigma={config.nuclear_segmentation_blur_sigma:g} px)"
-        )
+    nuclear_img = max_proj[config.nuclear_channel]
     
     mask = segment_nuclei(
         nuclear_img,

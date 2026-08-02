@@ -7,6 +7,9 @@ from cellpose import io, models
 
 
 DEFAULT_MODEL_NAME = "cpsam_v2"
+DEFAULT_DIAMETER = 300
+DEFAULT_PAD_TO_SHAPE = (2576, 2576)
+SEGMENTATION_PIPELINE_VERSION = "radial_gold_v1"
 _cached_models = {}
 
 
@@ -46,10 +49,10 @@ def segment_nuclei(
     img,
     sample_name,
     save_dir="./nucleus_seg/",
-    diameter=200,
+    diameter=DEFAULT_DIAMETER,
     min_area=5000,
     max_area=500000,
-    flow_threshold=0.2,
+    flow_threshold=0.4,
     cellprob_threshold=0.0,
     save_mask_tiff=False,
     verbose=True,
@@ -61,11 +64,31 @@ def segment_nuclei(
     batch_size=8,
     tile_overlap=0.1,
     bsize=None,
+    pad_to_shape=DEFAULT_PAD_TO_SHAPE,
+    **_ignored_legacy_kwargs,
 ):
     """Segment one nuclear-channel image with Cellpose and local size filtering."""
     os.makedirs(save_dir, exist_ok=True)
     model = model or get_model(model_name=model_name, prefer_gpu=prefer_gpu)
     model_name = getattr(model, "_henninger_model_name", model_name)
+    img = np.asarray(img)
+    run_img = img
+    crop_slices = None
+
+    if pad_to_shape is not None:
+        target_y, target_x = (int(pad_to_shape[0]), int(pad_to_shape[1]))
+        if target_y <= 0 or target_x <= 0:
+            raise ValueError(f"pad_to_shape must contain positive dimensions, got {pad_to_shape!r}")
+        if img.shape[0] < target_y or img.shape[1] < target_x:
+            padded_shape = (max(img.shape[0], target_y), max(img.shape[1], target_x))
+            y0 = (padded_shape[0] - img.shape[0]) // 2
+            x0 = (padded_shape[1] - img.shape[1]) // 2
+            run_img = np.zeros(padded_shape, dtype=img.dtype)
+            run_img[y0:y0 + img.shape[0], x0:x0 + img.shape[1]] = img
+            crop_slices = (slice(y0, y0 + img.shape[0]), slice(x0, x0 + img.shape[1]))
+
+    if isinstance(batch_size, str):
+        batch_size = 8 if batch_size.strip().lower() == "auto" else int(batch_size)
 
     eval_params = {
         "diameter": diameter,
@@ -79,15 +102,17 @@ def segment_nuclei(
     if bsize is not None:
         eval_params["bsize"] = bsize
 
-    mask, _flow, _diam = model.eval(img, **eval_params)
-    if mask.shape != img.shape:
+    mask, _flow, _diam = model.eval(run_img, **eval_params)
+    if mask.shape != run_img.shape:
         import cv2
 
         mask = cv2.resize(
             mask,
-            (img.shape[1], img.shape[0]),
+            (run_img.shape[1], run_img.shape[0]),
             interpolation=cv2.INTER_NEAREST,
         )
+    if crop_slices is not None:
+        mask = mask[crop_slices]
 
     mask = filter_and_relabel_mask(mask, min_area=min_area, max_area=max_area, verbose=verbose)
 
@@ -105,6 +130,146 @@ def segment_nuclei(
     if verbose:
         print(f"Processed {sample_name}: found {int(mask.max()) if mask.size else 0} nuclei")
     return mask
+
+
+def segment_nuclei_batch_2D(
+    image_items,
+    save_dir="./nucleus_seg/",
+    diameter=DEFAULT_DIAMETER,
+    min_area=5000,
+    max_area=500000,
+    flow_threshold=0.4,
+    cellprob_threshold=0.0,
+    save_mask_tiff=True,
+    verbose=True,
+    save_plot=True,
+    model=None,
+    model_name=DEFAULT_MODEL_NAME,
+    prefer_gpu=True,
+    niter=None,
+    batch_size=8,
+    tile_overlap=0.1,
+    bsize=None,
+    pad_to_shape=DEFAULT_PAD_TO_SHAPE,
+    return_names=False,
+    **_ignored_legacy_kwargs,
+):
+    """Segment a sequence of (sample_name, image) records through segment_nuclei."""
+    model = model or get_model(model_name=model_name, prefer_gpu=prefer_gpu)
+    results = []
+    for item in image_items:
+        sample_name, img = item[0], item[1]
+        mask = segment_nuclei(
+            img,
+            sample_name,
+            save_dir=save_dir,
+            diameter=diameter,
+            min_area=min_area,
+            max_area=max_area,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
+            save_mask_tiff=save_mask_tiff,
+            verbose=verbose,
+            save_plot=save_plot,
+            model=model,
+            model_name=model_name,
+            prefer_gpu=prefer_gpu,
+            niter=niter,
+            batch_size=batch_size,
+            tile_overlap=tile_overlap,
+            bsize=bsize,
+            pad_to_shape=pad_to_shape,
+        )
+        results.append((sample_name, mask))
+
+    if return_names:
+        return results
+    return [mask for _sample_name, mask in results]
+
+
+def segment_from_cache(
+    cache_folder,
+    output_folder="./results/",
+    flow_threshold=0.4,
+    cellprob_threshold=0.0,
+    diameter=DEFAULT_DIAMETER,
+    nuclear_channel=0,
+    save_plot=True,
+    batch_size=8,
+    model=None,
+    pad_to_shape=DEFAULT_PAD_TO_SHAPE,
+    **_ignored_legacy_kwargs,
+):
+    """Segment cached max-projection TIFF files with the standard nuclei path."""
+    from tqdm import tqdm
+
+    os.makedirs(output_folder, exist_ok=True)
+    tif_files = sorted(Path(cache_folder).glob("*.tif"))
+    if not tif_files:
+        print(f"No .tif files found in {cache_folder}")
+        print("Run cache_max_projections.py first to create cache files")
+        return
+
+    print(f"Found {len(tif_files)} cached images to segment")
+    print("Parameters:")
+    print(f"  Diameter: {diameter}")
+    print(f"  Flow threshold: {flow_threshold}")
+    print(f"  Cellprob threshold: {cellprob_threshold}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Pad to shape: {pad_to_shape}")
+    print()
+
+    model = model or get_model()
+    qc_paths = []
+    if isinstance(batch_size, str):
+        if batch_size.strip().lower() == "auto":
+            batch_size = 8
+        elif "," in batch_size:
+            batch_size = max(int(part.strip()) for part in batch_size.split(",") if part.strip())
+        else:
+            batch_size = int(batch_size)
+
+    for tif_file in tqdm(tif_files, desc="Segmenting nuclei"):
+        sample_name = Path(tif_file).stem
+        try:
+            try:
+                img = tifffile.imread(tif_file, key=nuclear_channel)
+                if img.ndim != 2:
+                    raise ValueError("single-page read did not return a 2D image")
+            except Exception:
+                img = tifffile.imread(tif_file)[nuclear_channel, :, :]
+
+            print(f"\nProcessing {sample_name} (shape: {img.shape})")
+            mask = segment_nuclei(
+                img,
+                sample_name,
+                save_dir=output_folder,
+                save_mask_tiff=True,
+                flow_threshold=flow_threshold,
+                cellprob_threshold=cellprob_threshold,
+                diameter=diameter,
+                verbose=True,
+                save_plot=save_plot,
+                model=model,
+                batch_size=batch_size,
+                pad_to_shape=pad_to_shape,
+            )
+
+            print(f"  Found {int(mask.max()) if mask.size else 0} nuclei")
+            qc_path = os.path.join(output_folder, f"{sample_name}_seg.png")
+            if save_plot and os.path.exists(qc_path):
+                qc_paths.append(qc_path)
+        except Exception as error:
+            print(f"\nError processing {sample_name}: {error}")
+
+    if qc_paths:
+        for contact_sheet_path in save_qc_contact_sheet(
+            os.path.join(output_folder, "segmentation_qc_contact_sheet.png"),
+            qc_paths,
+        ):
+            print(f"Segmentation QC contact sheet: {contact_sheet_path}")
+
+    print(f"\nSegmentation complete! Results saved to {output_folder}")
 
 
 def filter_and_relabel_mask(mask, min_area=5000, max_area=500000, verbose=True):
