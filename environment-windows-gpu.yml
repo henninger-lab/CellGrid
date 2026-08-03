@@ -1,10 +1,18 @@
 # Windows x86-64 environment for CellGrid with NVIDIA CUDA acceleration.
-# Requires a current NVIDIA driver compatible with CUDA 12.6.
+# Requires a current NVIDIA driver compatible with CUDA 13.0.
 name: cellgrid-win-gpu
 channels:
   - conda-forge
+  # Do not mix defaults packages into this environment. In particular, mixing
+  # OpenMP runtimes from different channels can make PyTorch fail on Windows.
+  - nodefaults
 dependencies:
   - python=3.12
+  # Install the CUDA-enabled PyTorch stack from conda-forge so it uses the same
+  # OpenMP runtime as NumPy, SciPy, Numba, and the rest of this environment.
+  - pytorch-gpu=2.13.0
+  - torchvision=0.28.0
+  - cuda-version=13.0
   - numpy
   - matplotlib
   - scikit-image
@@ -18,9 +26,6 @@ dependencies:
   - reportlab
   - pip
   - pip:
-      # Keep this matched CUDA pair together. The extra index supplies the
-      # CUDA-enabled wheels while PyPI supplies Cellpose and its dependencies.
-      - --extra-index-url=https://download.pytorch.org/whl/cu126
-      - torch==2.7.1+cu126
-      - torchvision==0.22.1+cu126
+      # Cellpose 4.2+ is required for the cpsam_v2 model. PyTorch is already
+      # supplied by conda above; pip will recognize and retain that build.
       - cellpose==4.2.1.1
