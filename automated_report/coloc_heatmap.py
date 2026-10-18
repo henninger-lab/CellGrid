@@ -9,7 +9,7 @@ import numpy as np
 from typing import Tuple, Optional
 from numba import njit, prange
 
-VALID_COLOC_COLORMAPS = ['oslo']
+VALID_COLOC_COLORMAPS = ['oslo', 'white_to_black']
 
 
 def get_coloc_colormap(colormap: str = 'oslo'):
@@ -18,6 +18,10 @@ def get_coloc_colormap(colormap: str = 'oslo'):
         raise ValueError(
             f"Unknown colocalization colormap '{colormap}'. Valid options: {VALID_COLOC_COLORMAPS}"
         )
+
+    if colormap == 'white_to_black':
+        from matplotlib.colors import LinearSegmentedColormap
+        return LinearSegmentedColormap.from_list('white_to_black', ['white', 'black'])
 
     from palettable.scientific.sequential import Oslo_20
     return Oslo_20.mpl_colormap
@@ -137,8 +141,8 @@ def render_coloc_heatmap(
     """
     Render colocalization heatmap as an RGB image.
     
-    Zero and negative values are rendered as black. Only positive 
-    colocalization values are shown on the colormap.
+    Zero and negative values use the low-end color: black for Oslo, white
+    for white_to_black. Values at or above vmax use the high-end color.
     
     Parameters:
     -----------
@@ -177,9 +181,9 @@ def render_coloc_heatmap(
     rgba = cmap(normalized)
     rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
     
-    # Force pixels with zero/negative colocalization to be black
-    mask = coloc_data <= 0
-    rgb[mask] = 0
+    # Preserve Oslo's exact black background; white_to_black uses its white endpoint.
+    if colormap == 'oslo':
+        rgb[coloc_data <= 0] = 0
     
     if return_scale:
         return rgb, {

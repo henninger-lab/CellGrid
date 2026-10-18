@@ -87,3 +87,44 @@ def test_batch_entry_point_processes_images_independently(tmp_path):
     assert [name for name, _mask in results] == ["one", "two"]
     assert len(model.calls) == 2
     assert all(call_params["batch_size"] == 8 for _image, call_params in model.calls)
+
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+class ModelLoadingTests(unittest.TestCase):
+    def setUp(self):
+        for target, name, value in [
+            (cellpose_nuclear_seg, '_cached_models', {}),
+            (cellpose_nuclear_seg.models, 'MODEL_NAMES', ['cpsam_v2']),
+            (cellpose_nuclear_seg.io, 'logger_setup', lambda: None),
+        ]:
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_unsupported_model_fails_before_loading(self):
+        with patch.object(cellpose_nuclear_seg.models, 'MODEL_NAMES', ['cpsam']), \
+             patch.object(cellpose_nuclear_seg, 'version', return_value='4.1.1'), \
+             patch.object(cellpose_nuclear_seg.models, 'CellposeModel') as constructor:
+            with self.assertRaisesRegex(RuntimeError, 'cellpose==4.2.1.1') as error:
+                cellpose_nuclear_seg.get_model()
+            self.assertIn('4.1.1', str(error.exception))
+            self.assertIn('restart', str(error.exception).lower())
+            constructor.assert_not_called()
+
+    def test_supported_model_is_verified_and_cached(self):
+        model = SimpleNamespace(pretrained_model='/models/cpsam_v2', device=SimpleNamespace(type='cpu'))
+        with patch.object(cellpose_nuclear_seg.models, 'CellposeModel', return_value=model) as constructor:
+            self.assertIs(cellpose_nuclear_seg.get_model(prefer_gpu=False), model)
+            self.assertIs(cellpose_nuclear_seg.get_model(prefer_gpu=False), model)
+            constructor.assert_called_once_with(pretrained_model='cpsam_v2', gpu=False)
+
+    def test_wrong_model_is_still_rejected(self):
+        model = SimpleNamespace(pretrained_model='/models/cpsam')
+        with patch.object(cellpose_nuclear_seg.models, 'CellposeModel', return_value=model):
+            with self.assertRaisesRegex(RuntimeError, "but loaded 'cpsam'"):
+                cellpose_nuclear_seg.get_model()
+            self.assertFalse(cellpose_nuclear_seg._cached_models)

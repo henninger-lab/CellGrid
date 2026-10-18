@@ -19,9 +19,10 @@ import tifffile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.patches import Rectangle
 import sys
 from scipy.interpolate import splprep, splev
 
@@ -50,11 +51,15 @@ from .nucleus_extractor import (
     get_crop_bounds,
 )
 from .contrast_calculator import (
-    compute_global_contrast,
     compute_per_file_contrast,
-    apply_file_contrast_to_nuclei,
     apply_global_contrast,
     format_contrast_summary,
+)
+
+from .path_utils import normalize_directory_path
+
+from .shared_contrast import (
+    field_histograms, compute_shared_contrast, resolve_contrast_groups, validate_contrast_settings,
 )
 
 from .coloc_heatmap import (
@@ -143,11 +148,15 @@ class ReportConfig:
     show_channel_header_labels: bool = True  # Legacy field; page-1 channel labels are always shown
     
     # Contrast - list of (low, high) percentile tuples per channel
-    # If None, uses (0.5, 99.5) for all channels
+    # Shared: background / nuclear percentiles, default (50, 99.5).
+    # Per-field: full-image percentiles, default (0.5, 99.5).
     # If fewer tuples than channels, last tuple is reused
     fish_contrast_setting: bool = False
     contrast_percentiles: Optional[list[tuple[float, float]]] = None
     
+    contrast_mode: str = "shared"  # per_field restores full-field percentile scaling
+    contrast_groups: Optional[list[list[str]]] = None
+
     # Channels
     visible_channels: Optional[list[int]] = None  # None = all
     channel_colors: Optional[list[str]] = None  # None = auto from wavelengths
@@ -164,6 +173,10 @@ class ReportConfig:
     use_cache: bool = True
     cache_dir: Optional[str] = None
     
+    def __post_init__(self):
+        self.input_dir = normalize_directory_path(self.input_dir)
+        self.output_dir = normalize_directory_path(self.output_dir)
+
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dictionary."""
         return asdict(self)
@@ -1075,15 +1088,33 @@ def generate_multipage_pdf(
                     ax.imshow(img)
                     ax.axis('off')
                     
+                    is_white_coloc = (
+                        coloc_scale_info is not None
+                        and img_idx == len(all_images) - 1
+                        and config.coloc_colormap == 'white_to_black'
+                    )
+                    if is_white_coloc:
+                        # An explicit patch remains visible with axes turned off.
+                        ax.add_patch(Rectangle(
+                            (0, 0), 1, 1, transform=ax.transAxes,
+                            fill=False, edgecolor='black', linewidth=0.5,
+                            clip_on=False, zorder=10,
+                        ))
+                    annotation_color = 'black' if is_white_coloc else 'white'
+                    image_scale_bar = (
+                        replace(scale_bar_config, color='black', label_color='black')
+                        if is_white_coloc else scale_bar_config
+                    )
+
                     # Draw nucleus outline on all images (if enabled)
                     if config.show_outline and contour is not None:
-                        draw_nucleus_outline(ax, contour, color='white', linewidth=0.8, smooth=False)
+                        draw_nucleus_outline(ax, contour, color=annotation_color, linewidth=0.8, smooth=False)
                     
                     # Add scale bar (only on first nucleus of first page, first image)
                     if is_first_page and slot_idx == 1 and img_idx == 0:
-                        _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=True)
+                        _add_scale_bar(ax, pixel_size_um, (img_h, img_w), image_scale_bar, show_label=True)
                     else:
-                        _add_scale_bar(ax, pixel_size_um, (img_h, img_w), scale_bar_config, show_label=False)
+                        _add_scale_bar(ax, pixel_size_um, (img_h, img_w), image_scale_bar, show_label=False)
 
                     if (
                         is_first_page
@@ -1303,12 +1334,16 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
         if progress_tracker:
             progress_tracker.set_stage(name)
     
+    contrast_groups = resolve_contrast_groups(config.genotypes, config.contrast_groups)
+    validate_contrast_settings(config.contrast_mode, config.contrast_percentiles, config.contrast_groups)
+
     log("=" * 60)
     log("AUTOMATED QC REPORT GENERATOR")
     log("=" * 60)
     log(f"Input directory: {config.input_dir}")
     log(f"Output directory: {config.output_dir}")
     log(f"Genotypes: {config.genotypes}")
+    log(f"Contrast mode: {config.contrast_mode}")
     log(f"Nuclear channel: {config.nuclear_channel}")
     log(f"Box size: {config.box_size_um} µm")
     if config.enable_coloc and config.coloc_channels:
@@ -1339,6 +1374,7 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
     image_data_dict: dict[str, np.ndarray] = {}
     coloc_data_dict: dict[str, np.ndarray] = {}  # Colocalization heatmaps per file
     czi_info_dict: dict[str, CziImage] = {}
+    contrast_fields = {g: [] for g in config.genotypes}
     existing_ids: set[str] = set()
     segmentation_qc_paths: list[str] = []
     
@@ -1416,6 +1452,14 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
 
             log(f"  Extracted: {len(nucleus_crops)} crops for '{genotype}'")
             
+            if config.contrast_mode == "shared":
+                histograms = field_histograms(max_proj, mask)
+                contrast_fields[genotype].append(histograms)
+            else:
+                limits = compute_per_file_contrast(max_proj, config.contrast_percentiles)
+                apply_global_contrast(nucleus_crops, limits)
+                log(f"  Per-field contrast: {czi.name}")
+                log(format_contrast_summary(limits))
             all_nucleus_crops[genotype].extend(nucleus_crops)
             image_data_dict[czi.name] = max_proj
             if coloc_data is not None:
@@ -1446,6 +1490,18 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
         n_nuclei = len(all_nucleus_crops[genotype])
         log(f"  {genotype}: {n_nuclei} nuclei")
     
+    # Compute once per group, before any condition's PDF is rendered.
+    for group in contrast_groups if config.contrast_mode == "shared" else []:
+        crops = [crop for g in group for crop in all_nucleus_crops[g]]
+        if not crops:
+            continue
+        fields = [field for g in group for field in contrast_fields[g]]
+        limits = compute_shared_contrast(fields, config.contrast_percentiles)
+        apply_global_contrast(crops, limits)
+        log(f"Shared contrast: {', '.join(group)}")
+        log(format_contrast_summary(limits))
+    contrast_fields.clear()
+
     # Generate PDFs
     set_stage("📄 Generating PDF reports...")
     log("\n" + "=" * 60)
@@ -1460,37 +1516,6 @@ def generate_qc_report_with_progress(config: ReportConfig, progress_tracker=None
             continue
         
         log(f"\n[{genotype}] Processing {len(nucleus_crops)} nuclei...")
-        
-        # Compute per-file contrast
-        nuclei_by_file: dict[str, list[NucleusCrop]] = {}
-        for nuc in nucleus_crops:
-            if nuc.source_filename not in nuclei_by_file:
-                nuclei_by_file[nuc.source_filename] = []
-            nuclei_by_file[nuc.source_filename].append(nuc)
-        
-        # Compute and apply contrast per file
-        file_contrast_settings: dict[str, dict[int, tuple[float, float]]] = {}
-        
-        for source_file, file_nuclei in nuclei_by_file.items():
-            image_data = image_data_dict[source_file]
-            
-            contrast_limits = compute_per_file_contrast(
-                image_data,
-                percentiles=config.contrast_percentiles,
-            )
-            
-            file_contrast_settings[source_file] = contrast_limits
-            apply_file_contrast_to_nuclei(file_nuclei, contrast_limits)
-            
-            log(f"  {source_file}: {len(file_nuclei)} nuclei")
-            for ch, (vmin, vmax) in contrast_limits.items():
-                if config.contrast_percentiles and ch < len(config.contrast_percentiles):
-                    pct = config.contrast_percentiles[ch]
-                elif config.contrast_percentiles:
-                    pct = config.contrast_percentiles[-1]
-                else:
-                    pct = (0.5, 99.5)
-                log(f"    Ch{ch} ({pct[0]}-{pct[1]}%): [{vmin:.1f}, {vmax:.1f}]")
         
         # Determine color scheme
         color_scheme = None

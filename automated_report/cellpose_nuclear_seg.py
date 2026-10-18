@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
+import sys
 
 import numpy as np
 import tifffile
@@ -19,6 +21,18 @@ def get_model(model_name=DEFAULT_MODEL_NAME, prefer_gpu=True):
     cache_key = (model_name, bool(prefer_gpu))
     if cache_key in _cached_models:
         return _cached_models[cache_key]
+
+    if model_name == DEFAULT_MODEL_NAME and model_name not in getattr(models, "MODEL_NAMES", []):
+        try:
+            installed_version = version("cellpose")
+        except PackageNotFoundError:
+            installed_version = "unknown"
+        raise RuntimeError(
+            f"Installed Cellpose {installed_version} does not recognize {model_name!r}. "
+            "CellGrid requires cellpose==4.2.1.1. Update the environment running "
+            f'CellGrid with: "{sys.executable}" -m pip install cellpose==4.2.1.1; '
+            "Then restart the app."
+        )
 
     model = models.CellposeModel(pretrained_model=model_name, gpu=prefer_gpu)
     try:

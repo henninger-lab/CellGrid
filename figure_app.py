@@ -23,26 +23,20 @@ from automated_report.report_generator import (
 )
 from automated_report.parse_czi import CziImage, find_supported_image_files
 
+from automated_report.path_utils import normalize_directory_path
+
 genotype_matches = None
 
 
-def validate_contrast_percentiles(contrast_percentiles):
-    """Return validation errors and warnings for percentile pairs."""
-    errors = []
-    warnings = []
+from automated_report.shared_contrast import resolve_contrast_groups, validate_contrast_settings
 
-    for ch, (low, high) in enumerate(contrast_percentiles):
-        if low >= high:
-            errors.append(
-                f"Channel {ch}: low percentile ({low}) must be less than high percentile ({high})."
-            )
-        elif (high - low) < 10.0:
-            warnings.append(
-                f"Channel {ch}: low/high percentiles are only {high - low:.1f} points apart "
-                f"({low}, {high}). This may produce very aggressive contrast stretching."
-            )
 
-    return errors, warnings
+def validate_contrast_percentiles(contrast_percentiles, mode="shared"):
+    try:
+        validate_contrast_settings(mode, contrast_percentiles)
+    except ValueError as exc:
+        return [str(exc)], []
+    return [], []
 
 # Page config
 st.set_page_config(
@@ -74,6 +68,8 @@ with col_left:
         help="Enter the full path to your folder containing supported microscopy files"
     )
     
+    input_dir = normalize_directory_path(input_dir)
+
     # Scan for supported microscopy files if directory exists
     czi_files = []
     if input_dir and os.path.isdir(input_dir):
@@ -131,6 +127,8 @@ with col_left:
     
     st.divider()
     
+    output_dir = normalize_directory_path(output_dir)
+
     # Genotypes input
     st.header("🧬 Genotypes")
     st.markdown("""Enter genotype names (one per line). Files will be matched by substring.
@@ -237,15 +235,42 @@ with col_right:
     )
 
     st.markdown("### Contrast Normalization")
+    contrast_mode = st.radio(
+        "Contrast normalization",
+        options=["shared", "per_field"],
+        format_func=lambda mode: {
+            "shared": "Shared across fields within each condition or group (default)",
+            "per_field": "Per-field automatic contrast — each field scaled independently",
+        }[mode],
+        index=0,
+    )
+    per_field = contrast_mode == "per_field"
     st.markdown("**Per-channel contrast percentiles**")
-    st.caption("Set low and high percentiles for each channel. Leave empty to use defaults (0.5, 99.5). \nHigher percentiles for the max will preserve more of the dynamic range but may produce dimmer images if there are very bright pixels. Lower percentiles will produce brighter images but may saturate some pixels. Typically a max between 98 and 99.95 works well.")
+    if per_field:
+        st.caption("Each field uses its own full-image intensity percentiles (default: 0.5–99.5%). Displayed brightness is not comparable between fields. Condition groups do not apply.")
+    else:
+        st.caption("Each condition shares one contrast range across all fields. The low end uses background pixels outside nuclei (default: median, 50%); the high end uses pixels inside nuclei (default: 99.5%). Each field has equal weight.")
+    group_text = st.text_area(
+        "Conditions sharing brightness/contrast",
+        placeholder="WT, KO\nTreatment A, Treatment B",
+        disabled=per_field,
+        help="One group per line, with exact condition names separated by commas. Each condition can appear in only one group. Unlisted conditions are scaled independently.",
+    )
+    contrast_groups = [[name.strip() for name in line.split(",")]
+                       for line in group_text.splitlines() if line.strip()]
+    if per_field:
+        contrast_groups = []
+    group_errors = []
+    try:
+        resolve_contrast_groups(genotypes, contrast_groups)
+    except ValueError as exc:
+        group_errors.append(str(exc))
 
     fish_contrast_setting = st.checkbox(
-        "FISH contrast setting",
-        value=False,
-        help="Override all channels to use min percentile 90 and max percentile 100."
+        "FISH contrast setting", value=False,
+        help=("Use full-field percentiles 90 and 100 for every channel." if per_field else "Use the 90th background percentile and 100th nuclear percentile for every channel, shared across each condition group.")
     )
-    
+
     # Dynamic channel contrast inputs
     n_contrast_channels = st.number_input(
         "Number of channels to configure",
@@ -260,29 +285,30 @@ with col_right:
         col_c1, col_c2 = st.columns(2)
         with col_c1:
             low = st.number_input(
-                f"Ch{ch} low %",
+                f"Ch{ch} low % (full field)" if per_field else f"Ch{ch} background %",
                 min_value=0.0,
                 max_value=100.0,
-                value=0.5,
+                value=0.5 if per_field else 50.0,
                 step=0.1,
-                key=f"contrast_low_{ch}"
+                key=f"contrast_low_{contrast_mode}_{ch}"
             )
         with col_c2:
             high = st.number_input(
-                f"Ch{ch} high %",
+                f"Ch{ch} high % (full field)" if per_field else f"Ch{ch} nuclear %",
                 min_value=0.0,
                 max_value=100.0,
-                value=99.8,
+                value=99.5,
                 step=0.1,
-                key=f"contrast_high_{ch}"
+                key=f"contrast_high_{contrast_mode}_{ch}"
             )
         contrast_percentiles.append((low, high))
 
     if fish_contrast_setting:
         contrast_percentiles = [(90.0, 100.0) for _ in range(n_contrast_channels)]
-        st.info("FISH contrast setting enabled: all channels will use min percentile 90 and max percentile 100.")
+        st.info("FISH preset: full-field percentiles 90 and 100." if per_field else "FISH preset: 90th background percentile and 100th nuclear percentile.")
 
-contrast_errors, contrast_warnings = validate_contrast_percentiles(contrast_percentiles)
+contrast_errors, contrast_warnings = validate_contrast_percentiles(contrast_percentiles, contrast_mode)
+contrast_errors.extend(group_errors)
 for warning in contrast_warnings:
     st.warning(f"⚠️ {warning}")
 
@@ -380,6 +406,7 @@ if enable_coloc:
         coloc_colormap = st.selectbox(
             "Colormap",
             options=VALID_COLOC_COLORMAPS,
+            format_func=lambda name: "White to black (0 = white, upper threshold = black)" if name == "white_to_black" else "Oslo",
             index=VALID_COLOC_COLORMAPS.index("oslo"),
             help="Colormap used for the colocalization heatmap and its scale bar.",
         )
@@ -396,7 +423,7 @@ if enable_coloc:
         max_value=100.0,
         value=20.0,
         step=5.0,
-        help="Maximum value for colormap scaling. Lower values = brighter colocalization signal."
+        help="Score mapped to the top of the color scale. With white to black, this value and higher scores appear black."
     )
     
     st.info("ℹ️ Colocalization is computed from the full 3D image before max projection. "
@@ -438,6 +465,8 @@ if st.button("🚀 Generate Reports", type="primary", disabled=not ready_to_run,
         rows_per_page=rows_per_page,
         nucleus_cols=nucleus_cols,
         show_outline=show_outline,
+        contrast_mode=contrast_mode,
+        contrast_groups=contrast_groups or None,
         fish_contrast_setting=fish_contrast_setting,
         contrast_percentiles=contrast_percentiles if contrast_percentiles else None,
         channel_colors=channel_colors if channel_colors else None,

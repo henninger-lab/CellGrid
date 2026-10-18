@@ -23,25 +23,14 @@ from .report_generator import (
 )
 
 
-def validate_contrast_percentiles(
-    contrast_percentiles: list[tuple[float, float]],
-    *,
-    error_fn,
-    warning_fn,
-):
-    """Validate percentile pairs and emit warnings for narrow ranges."""
-    for ch, (low, high) in enumerate(contrast_percentiles):
-        if low >= high:
-            error_fn(
-                f"Invalid contrast percentile pair for channel {ch}: "
-                f"low={low} must be less than high={high}."
-            )
-        if (high - low) < 10.0:
-            warning_fn(
-                f"Warning: channel {ch} contrast percentiles are only "
-                f"{high - low:.1f} percentage points apart ({low}, {high}). "
-                "This may produce very aggressive contrast stretching."
-            )
+from .shared_contrast import resolve_contrast_groups, validate_percentiles, validate_contrast_settings
+
+
+def validate_contrast_percentiles(contrast_percentiles, *, error_fn, warning_fn):
+    try:
+        validate_percentiles(contrast_percentiles)
+    except ValueError as exc:
+        error_fn(str(exc))
 
 
 def main():
@@ -65,7 +54,7 @@ Examples:
         --input_dir ./images/ \\
         --genotypes WT KO \\
         --nuclear_channel 0 \\
-        --contrast_percentiles 0.5,95.0 10,99.95
+        --contrast_percentiles 50,95.0 50,99.95
 
     # Disable nucleus outlines
     python -m automated_report \\
@@ -208,16 +197,28 @@ Examples:
     
     # Contrast options
     parser.add_argument(
+        '--contrast_mode', choices=['shared', 'per_field'], default='shared',
+        help='Shared across fields within each condition/group (default), or per_field: '
+             'independent full-field scaling; displayed brightness is not comparable between fields.'
+    )
+    parser.add_argument(
         '--contrast_percentiles',
         nargs='+',
         type=str,
         default=None,
-        help='Contrast percentile limits per channel as low,high pairs. '
-             'E.g., --contrast_percentiles 0.5,95.0 10,99.95 for 2 channels. '
+        help='Background and nuclear percentiles per channel as low,high pairs. '
+             'E.g., --contrast_percentiles 50,95.0 50,99.95 for 2 channels. '
              'If fewer pairs than channels, last pair is reused. '
-             'Default: 0.5,99.5 for all channels.'
+             'Default: 50,99.5 (background/nuclear) in shared mode; '
+             '0.5,99.5 (full image) in per_field mode.'
     )
     
+    parser.add_argument(
+        '--contrast_group', action='append', nargs='+', default=None,
+        help='Conditions sharing contrast, e.g. --contrast_group WT KO. '
+             'Repeat for independent groups. Unlisted conditions are scaled separately.'
+    )
+
     # Outline options
     parser.add_argument(
         '--no_outline',
@@ -271,7 +272,7 @@ Examples:
         type=float,
         default=0.3,
         help='Max brightness for colocalization colormap (default: 0.3). '
-             'Lower values = brighter signal.'
+             'Scores at or above this value use the top color (black for white_to_black).'
     )
     parser.add_argument(
         '--coloc_colormap',
@@ -293,8 +294,9 @@ Examples:
                 contrast_percentiles.append((float(low), float(high)))
             except ValueError:
                 print(f"Warning: Invalid contrast percentile pair '{pair_str}', expected format: low,high")
-                print("Using default 0.5,99.5")
-                contrast_percentiles.append((0.5, 99.5))
+                default_pair = (0.5, 99.5) if args.contrast_mode == "per_field" else (50.0, 99.5)
+                print(f"Using default {default_pair}")
+                contrast_percentiles.append(default_pair)
 
         validate_contrast_percentiles(
             contrast_percentiles,
@@ -302,6 +304,12 @@ Examples:
             warning_fn=lambda msg: print(msg, file=sys.stderr),
         )
     
+    try:
+        validate_contrast_settings(args.contrast_mode, contrast_percentiles, args.contrast_group)
+        resolve_contrast_groups(args.genotypes, args.contrast_group)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     # Create configuration
     config = ReportConfig(
         input_dir=args.input_dir,
@@ -323,6 +331,8 @@ Examples:
         nucleus_cols=args.nucleus_cols,
         dpi=args.dpi,
         contrast_percentiles=contrast_percentiles,
+        contrast_mode=args.contrast_mode,
+        contrast_groups=args.contrast_group,
         visible_channels=args.visible_channels,
         channel_colors=args.channel_colors,
         show_outline=not args.no_outline,

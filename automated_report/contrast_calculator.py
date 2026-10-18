@@ -21,6 +21,8 @@ def compute_per_file_contrast(
     percentiles: Optional[list[tuple[float, float]]] = None,
 ) -> dict[int, tuple[float, float]]:
     """
+    Legacy full-image calculation used by optional per-field normalization.
+
     Compute contrast limits from a full max-projected image.
     
     This computes contrast from the entire field of view, not just nucleus crops,
