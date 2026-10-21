@@ -6,6 +6,7 @@ Run with:
     streamlit run streamlit_app.py
 """
 
+import torch  # Keep before Streamlit/NumPy for Windows workstation compatibility.
 import streamlit as st
 import os
 import sys

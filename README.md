@@ -22,6 +22,26 @@ conda activate figure-gen
 streamlit run figure_app.py
 ```
 
+## Windows analysis workstation updates
+
+Keep the existing working `cellgrid-win-gpu` Conda environment. Pulling source updates does not change its installed packages. For the current contrast/colormap update, no new dependencies are needed beyond the existing environment specification (including Cellpose 4.2.1.1).
+
+1. Stop CellGrid and open an Anaconda/Miniconda Prompt in the repository folder.
+2. Run `git pull --ff-only`. The merged history includes the workstation fixes and the contrast/colormap updates. If Git refuses because of local edits or divergent history, preserve those changes and resolve the history; do not force-push or reset to discard them.
+3. Run the following once after updating:
+
+```bat
+conda activate cellgrid-win-gpu
+python gpu_diagnostic.py
+python test_cellpose.py
+```
+
+The checks should report CUDA available, the workstation's NVIDIA GPU, and verified model `cpsam_v2` running on CUDA. If Cellpose is older, update only that package in this active environment with `python -m pip install cellpose==4.2.1.1`, then rerun the checks. Keep the working Conda CUDA/PyTorch stack; do not recreate the environment with the generic `environment.yml`.
+
+4. Start with `launch_cellgrid.bat`. It activates `%USERPROFILE%\miniconda3`'s `cellgrid-win-gpu` environment, uses the folder containing the launcher, and imports PyTorch before Streamlit. If Miniconda is installed elsewhere, adjust the activation path in the launcher. Keep the PyTorch-first startup order.
+
+For a **new** Windows NVIDIA installation only, create the environment using `conda env create -f environment-windows-gpu.yml`, then run the checks above. A compatible NVIDIA driver is required. The model check may download weights on its first run.
+
 ## Input/Output
 - Input: folder containing z-stack `.czi`, `.ome.tif`, or `.ome.tiff` images
 - Outputs:  
