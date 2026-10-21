@@ -6,6 +6,7 @@ Run with:
     streamlit run streamlit_app.py
 """
 
+import torch
 import streamlit as st
 import os
 import sys
